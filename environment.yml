@@ -1,0 +1,34 @@
+name: gslam
+variables:
+  BUILD_NO_CUDA: 1
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+  - nvidia
+dependencies:
+  - conda-forge::gcc_impl_linux-64=11.4.0
+  - conda-forge::gxx_impl_linux-64=11.4.0
+  - conda-forge::ld_impl_linux-64
+  - conda-forge::libxcrypt
+  - nvidia/label/cuda-12.1.0::cuda-nvcc
+  - nvidia/label/cuda-12.1.0::cuda-toolkit
+  - nvidia/label/cuda-12.1.0::cuda-cudart-dev
+  - python=3.11
+  - pip
+  - pytorch
+  - torchaudio
+  - torchvision
+  - pytorch-cuda=12.1
+  - tqdm
+  - pip:
+    - opencv-python
+    - torchmetrics
+    - PyOpenGL
+    - glfw
+    - PyGLM
+    - wandb
+    - rich
+    - ruff
+    - viser
+    - pyquaternion
