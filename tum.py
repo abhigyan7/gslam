@@ -46,6 +46,7 @@ class TumRGB:
     def __getitem__(self, idx):
         filename = self.sequence_dir / self.rgb_frame_filenames[idx]
         image = np.asarray(Image.open(filename))
+        image = np.float32(image) / 255.0
         pose = self.poses[idx, ...]
         return image, pose, self.rgb_frame_timestamps[idx]
 

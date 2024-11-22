@@ -1,31 +1,18 @@
-import torch
-import torch.nn.functional as F
-from torch import Tensor
-import tqdm 
-
-from typing import Tuple, Dict, List, Union 
-
+from typing import Tuple, Dict, Union
 from dataclasses import dataclass, field
 
+import tqdm
+import torch
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 
-from sklearn.neighbors import NearestNeighbors
-
-
 from tum import TumRGB
-
-
-def knn(x: Tensor, K: int = 4) -> Tensor:
-    x_np = x.cpu().numpy()
-    model = NearestNeighbors(n_neighbors=K, metric="euclidean").fit(x_np)
-    distances, _ = model.kneighbors(x_np)
-    return torch.from_numpy(distances).to(x)
+from utils import knn, torch_to_pil
 
 
 @dataclass
 class MapConfig:
-    
+
     densification_strategy: Union[DefaultStrategy, MCMCStrategy] = field (
         default_factory=DefaultStrategy
     )
@@ -42,13 +29,14 @@ class MapConfig:
     background_color: Tuple[float, 3] = (0.0, 0.0, 0.0)
 
     initialization_type: str = 'random'
-    initial_number_of_gaussians: int = 30_000
+    initial_number_of_gaussians: int = 300_000
     initial_extent: float = 3000.0
     initial_opacity: float = 0.9
     initial_scale: float = 1.0
     scene_scale: float = 1.0
 
     device: str = 'cuda:0'
+
 
 def initialize_map(
     map_conf: MapConfig,
@@ -88,24 +76,19 @@ def initialize_map(
 def main():
 
     tum_dataset = TumRGB('datasets/tum/rgbd_dataset_freiburg1_desk')
-
-    splats, optimizers = initialize_map(MapConfig())
-
-    print("Model initialized. Number of GS:", len(splats["means"]))
-
-    img, camtoworld, ts = tum_dataset[0]
-
+    gt_img, camtoworld, timestamps = tum_dataset[0]
+    gt_img = torch.FloatTensor(gt_img).cuda().unsqueeze(0)
     camtoworld = torch.eye(4)
-
-    height, width, _ = img.shape
-
+    _, height, width, _ = gt_img.shape
+    viewmats = torch.linalg.inv(torch.FloatTensor(camtoworld).unsqueeze(0).cuda())
     Ks = torch.FloatTensor([
         [525.0, 0.0, 319.5],
         [0.0, 525.5, 239.5],
         [0.0,   0.0,   0.0],
     ]).unsqueeze(0).cuda()
 
-    viewmats = torch.linalg.inv(torch.FloatTensor(camtoworld).unsqueeze(0).cuda())
+    splats, optimizers = initialize_map(MapConfig())
+    print("Model initialized. Number of GS:", len(splats["means"]))
 
     render_colors, render_alphas, info = rasterization(
         means = splats['means'],
@@ -118,6 +101,37 @@ def main():
         width = width,
         height = height,
     )
+
+    for _ in (pbar := tqdm.tqdm(range(10000))):
+        for _,optimizer in optimizers.items():
+            optimizer.zero_grad()
+
+        render_colors, render_alphas, info = rasterization(
+            means = splats['means'],
+            quats = splats['quats'],
+            scales = splats['scales'],
+            opacities = splats['opacities'],
+            colors = splats['colors'],
+            viewmats = viewmats,
+            Ks = Ks,
+            width = width,
+            height = height,
+        )
+
+        l1loss = (render_colors - gt_img).abs().sum()
+        l1loss.backward()
+
+        desc = f"loss={l1loss.item():.3f}"
+        pbar.set_description(desc)
+
+        for optimizer in optimizers.values():
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=False)
+
+    img = torch_to_pil(render_colors)
+    img.save('img.png')
+    img = torch_to_pil(gt_img)
+    img.save('img_gt.png')
 
     print(f'{render_colors.max()=}')
     print(f'{render_alphas.max()=}')
