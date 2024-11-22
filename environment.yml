@@ -12,6 +12,7 @@ dependencies:
   - conda-forge::ld_impl_linux-64
   - conda-forge::libxcrypt
   - nvidia/label/cuda-12.1.0::cuda-nvcc
+  - nvidia/label/cuda-12.1.0::cuda-cudart
   - nvidia/label/cuda-12.1.0::cuda-toolkit
   - nvidia/label/cuda-12.1.0::cuda-cudart-dev
   - python=3.11
