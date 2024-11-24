@@ -1,8 +1,11 @@
 from pathlib import Path
+import time
 
 import numpy as np
 from PIL import Image
 from pyquaternion import Quaternion
+
+from torch.multiprocessing import Process, JoinableQueue
 
 
 class TumRGB:
@@ -51,7 +54,29 @@ class TumRGB:
         return image, pose, self.rgb_frame_timestamps[idx]
 
 
+class RGBSensorStream(Process):
+
+    def __init__(self, dataset, queue):
+        self.dataset = dataset
+        self.queue = queue
+
+    def run(self):
+        for data in iter(self.dataset):
+            while len(queue) > 10:
+                # preventing choke
+                continue
+            self.queue.put(data)
+
+
 if __name__ == "__main__":
     td = TumRGB("/home/abhigyan/gslam/datasets/tum/rgbd_dataset_freiburg1_desk")
     print(td[0])
     print(td[1])
+
+    queue = JoinableQueue()
+    stream = RGBSensorStream(td, queue)
+    stream.run()
+    while not queue.empty():
+        print(queue.get())
+        queue.task_done()
+    # stream.join()
