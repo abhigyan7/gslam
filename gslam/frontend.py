@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import torch.multiprocessing as mp
 
-from  rasterization import RasterizerConfig
+from .rasterization import RasterizerConfig
 from gsplat.rendering import rasterization
 import tqdm
 
@@ -26,7 +26,6 @@ def get_projection_matrix():
     return Ks
 
 
-
 @dataclass
 class Camera:
     viewmat: torch.Tensor
@@ -41,6 +40,7 @@ class Frame:
     timestamp: float
     camera: Camera
     kind: str = 'rgb'
+
 
 # consider the implications of all these structs being torch modules
 class GaussianSplattingModel:
@@ -96,23 +96,23 @@ class GaussianSplattingModel:
 
 
 @dataclass
-class TrackerConfig:
+class TrackingConfig:
     device: str = 'cuda'
     num_tracking_iters: int = 150
 
     photometric_loss: str = 'l1'
 
 
-class Tracker(mp.Process):
+class Frontend(mp.Process):
 
     def __init__(self,
-                 tracker_conf: TrackerConfig,
+                 tracking_conf: TrackingConfig,
                  rasterizer_conf: RasterizerConfig,
                  backend_queue: mp.JoinableQueue,
                  frontend_queue: mp.JoinableQueue,
                  sensor_queue: mp.JoinableQueue):
 
-        self.config: TrackerConfig  = tracker_conf
+        self.tracking_config: TrackingConfig = tracking_conf
         self.rasterizer_conf: RasterizerConfig = rasterizer_conf
         self.map_queue: mp.JoinableQueue = backend_queue
         self.queue : mp.JoinableQueue[int] = frontend_queue

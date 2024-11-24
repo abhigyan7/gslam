@@ -1,14 +1,10 @@
 from typing import Tuple, Dict, Union
 from dataclasses import dataclass, field
 
-import tqdm
 import torch
-from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 
-from gslam.data import TumRGB
-from gslam.utils import knn, torch_to_pil
-
+from .utils import knn
 
 @dataclass
 class MapConfig:
@@ -73,69 +69,54 @@ def initialize_map(
     return params_dict, optimizers
 
 
-def main():
+# consider the implications of all these structs being torch modules
+class GaussianSplattingModel:
 
-    tum_dataset = TumRGB('../datasets/tum/rgbd_dataset_freiburg1_desk')
-    gt_img, camtoworld, timestamps = tum_dataset[0]
-    gt_img = torch.FloatTensor(gt_img).cuda().unsqueeze(0)
-    camtoworld = torch.eye(4)
-    _, height, width, _ = gt_img.shape
-    viewmats = torch.linalg.inv(torch.FloatTensor(camtoworld).unsqueeze(0).cuda())
-    Ks = torch.FloatTensor([
-        [525.0, 0.0, 319.5],
-        [0.0, 525.5, 239.5],
-        [0.0,   0.0,   0.0],
-    ]).unsqueeze(0).cuda()
+    def __init__(self,
+                 means,        # gaussian centers
+                 covar_quats,  # quaternions of covariance matrices
+                 covar_scales, # scales of covariance matrices
+                 opacities,    # alpha of gaussians
+                 colors):      # RGB values of gaussians
+        self.means: torch.Tensor = means
+        self.covar_quats: torch.Tensor = covar_quats
+        self.covar_scales: torch.Tensor = covar_scales
+        self.opacities: torch.Tensor = opacities
+        self.colors: torch.Tensor = colors
 
-    splats, optimizers = initialize_map(MapConfig())
-    print("Model initialized. Number of GS:", len(splats["means"]))
 
-    render_colors, render_alphas, info = rasterization(
-        means = splats['means'],
-        quats = splats['quats'],
-        scales = splats['scales'],
-        opacities = splats['opacities'],
-        colors = splats['colors'],
-        viewmats = viewmats,
-        Ks = Ks,
-        width = width,
-        height = height,
-    )
+    def render(self,
+               camera: Camera):
+        rendered_rgb, rendered_alpha, render_info = rasterization(
+            means = self.means,
+            quats = self.covar_quats,
+            scales = self.covar_scales,
+            opacities = self.opacities,
+            colors = self.colors,
+            viewmats = camera.viewmat.unsqueeze(0),
+            Ks = camera.intrinsics,
+            width = camera.width,
+            height = camera.height,
+        )
+        return rendered_rgb, rendered_alpha, render_info
 
-    for _ in (pbar := tqdm.tqdm(range(10000))):
-        for _,optimizer in optimizers.items():
-            optimizer.zero_grad()
 
-        render_colors, render_alphas, info = rasterization(
-            means = splats['means'],
-            quats = splats['quats'],
-            scales = splats['scales'],
-            opacities = splats['opacities'],
-            colors = splats['colors'],
-            viewmats = viewmats,
-            Ks = Ks,
-            width = width,
-            height = height,
+    @staticmethod
+    def new_empty_model(device: str = 'cuda'):
+        return GaussianSplattingModel(
+            torch.Tensor(device=device),
+            torch.Tensor(device=device),
+            torch.Tensor(device=device),
+            torch.Tensor(device=device),
+            torch.Tensor(device=device),
         )
 
-        l1loss = (render_colors - gt_img).abs().sum()
-        l1loss.backward()
 
-        desc = f"loss={l1loss.item():.3f}"
-        pbar.set_description(desc)
-
-        for optimizer in optimizers.values():
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=False)
-
-    img = torch_to_pil(render_colors)
-    img.save('img.png')
-    img = torch_to_pil(gt_img)
-    img.save('img_gt.png')
-
-    print(f'{render_colors.max()=}')
-    print(f'{render_alphas.max()=}')
-
-
-if __name__ == '__main__':
-    main()
+    def clone(self):
+        return GaussianSplattingModel(
+            self.means.clone(),
+            self.covar_quats.clone(),
+            self.covar_scales.clone(),
+            self.opacities.clone(),
+            self.colors.clone(),
+        )
