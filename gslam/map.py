@@ -1,10 +1,13 @@
-from typing import Tuple, Dict, Union
+from typing import Tuple, Dict, Union, Self, Literal
 from dataclasses import dataclass, field
 
 import torch
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
+from gsplat.rendering import rasterization
 
 from .utils import knn
+from .primitives import Camera
+
 
 @dataclass
 class MapConfig:
@@ -34,43 +37,8 @@ class MapConfig:
     device: str = 'cuda:0'
 
 
-def initialize_map(
-    map_conf: MapConfig,
-) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
-
-    points = torch.rand( (map_conf.initial_number_of_gaussians, 3) ) * 2.0 - 1.0
-    points *= map_conf.initial_extent * map_conf.scene_scale
-    rgbs = torch.rand( (map_conf.initial_number_of_gaussians, 3) )
-
-    avg_distance_to_nearest_3_neighbors = torch.sqrt( knn(points, 4)[:, 1:] ** 2 ).mean(dim=-1)
-    scales = torch.log(avg_distance_to_nearest_3_neighbors * map_conf.initial_scale).unsqueeze(-1).repeat(1, 3)
-
-    N = points.shape[0]
-    quats = torch.rand( (N, 4) )
-    opacities = torch.logit( torch.full( (N,), map_conf.initial_opacity ))
-
-    params = [
-        ('means', torch.nn.Parameter(points), 1.6e-4 * map_conf.scene_scale),
-        ('quats', torch.nn.Parameter(quats), 1e-3),
-        ('scales', torch.nn.Parameter(scales), 5e-3),
-        ('opacities', torch.nn.Parameter(opacities), 5e-2),
-        ('colors', torch.nn.Parameter(rgbs), 2.5e-3 / 20),
-    ]
-
-    params_dict = torch.nn.ParameterDict(
-        {name: param for name, param, _lr in params}
-    ).to(map_conf.device)
-
-    optimizers = {
-        name: torch.optim.Adam(
-            params=[params_dict[name],], lr=lr,
-        ) for name, value, lr in params
-    }
-    return params_dict, optimizers
-
-
 # consider the implications of all these structs being torch modules
-class GaussianSplattingModel:
+class GaussianSplattingData(torch.nn.Module):
 
     def __init__(self,
                  means,        # gaussian centers
@@ -78,15 +46,15 @@ class GaussianSplattingModel:
                  covar_scales, # scales of covariance matrices
                  opacities,    # alpha of gaussians
                  colors):      # RGB values of gaussians
-        self.means: torch.Tensor = means
-        self.covar_quats: torch.Tensor = covar_quats
-        self.covar_scales: torch.Tensor = covar_scales
-        self.opacities: torch.Tensor = opacities
-        self.colors: torch.Tensor = colors
+        self.means: torch.nn.Parameter = torch.nn.Parameter(means)
+        self.covar_quats: torch.nn.Parameter = torch.nn.Parameter(covar_quats)
+        self.covar_scales: torch.nn.Parameter = torch.nn.Parameter(covar_scales)
+        self.opacities: torch.nn.Parameter = torch.nn.Parameter(opacities)
+        self.colors: torch.nn.Parameter = torch.nn.Parameter(colors)
 
 
-    def render(self,
-               camera: Camera):
+    def forward(self,
+               camera: Camera) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
         rendered_rgb, rendered_alpha, render_info = rasterization(
             means = self.means,
             quats = self.covar_quats,
@@ -102,21 +70,66 @@ class GaussianSplattingModel:
 
 
     @staticmethod
-    def new_empty_model(device: str = 'cuda'):
-        return GaussianSplattingModel(
-            torch.Tensor(device=device),
-            torch.Tensor(device=device),
-            torch.Tensor(device=device),
-            torch.Tensor(device=device),
-            torch.Tensor(device=device),
+    def new_empty_model():
+        return GaussianSplattingData(
+            torch.Tensor(),
+            torch.Tensor(),
+            torch.Tensor(),
+            torch.Tensor(),
+            torch.Tensor(),
         )
 
 
-    def clone(self):
-        return GaussianSplattingModel(
-            self.means.clone(),
-            self.covar_quats.clone(),
-            self.covar_scales.clone(),
-            self.opacities.clone(),
-            self.colors.clone(),
+    def clone(self) -> Self:
+        return GaussianSplattingData(
+            self.means.clone().detach(),
+            self.covar_quats.clone().detach(),
+            self.covar_scales.clone().detach(),
+            self.opacities.clone().detach(),
+            self.colors.clone().detach(),
         )
+
+
+class GaussianSplattingMap:
+
+    def __init__(self,
+                 map_config: MapConfig,
+                 data: GaussianSplattingData = None,):
+        self.data = data
+        self.config = map_config
+        return
+
+
+    def initialize_map_random(self):
+        points = torch.rand( (self.map_conf.initial_number_of_gaussians, 3) ) * 2.0 - 1.0
+        points *= self.map_conf.initial_extent * self.map_conf.scene_scale
+        rgbs = torch.rand( (self.map_conf.initial_number_of_gaussians, 3) )
+
+        avg_distance_to_nearest_3_neighbors = torch.sqrt( knn(points, 4)[:, 1:] ** 2 ).mean(dim=-1)
+        scales = torch.log(avg_distance_to_nearest_3_neighbors * self.map_conf.initial_scale).unsqueeze(-1).repeat(1, 3)
+
+        N = points.shape[0]
+        quats = torch.rand( (N, 4) )
+        opacities = torch.logit( torch.full( (N,), self.map_conf.initial_opacity ))
+
+        self.map = GaussianSplattingData(points, quats, scales, opacities, rgbs).to(self.map_conf.device)
+
+
+    def initialize_optimizers(self,):
+        # TODO fix these LRs
+        self.optimizers: Dict[str, torch.optim.Optimizer] = {}
+        self.optimizers['means'] = torch.optim.Adam(params=[self.map.means,], lr=0.001)
+        self.optimizers['quats'] = torch.optim.Adam(params=[self.map.quats,], lr=0.001)
+        self.optimizers['scales'] = torch.optim.Adam(params=[self.map.scales,], lr=0.001)
+        self.optimizers['opacities'] = torch.optim.Adam(params=[self.map.opacities,], lr=0.001)
+        self.optimizers['rgbs'] = torch.optim.Adam(params=[self.map.rgbs,], lr=0.001)
+
+
+    def zero_grad(self,):
+        for optimizer in self.optimizers.values():
+            optimizer.zero_grad()
+
+
+    def step(self,):
+        for optimizer in self.optimizers.values():
+            optimizer.step()

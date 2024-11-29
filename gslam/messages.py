@@ -11,4 +11,4 @@ class MapMessage(StrEnum):
     ACKNOWLEDGE_STOP = auto()
     REQUEST_RESET = auto()
     REQUEST_STOP = auto()
-    REQUEST_SYNC = auto()
+    ACKNOWLEDGE_INITIALIZE = auto()

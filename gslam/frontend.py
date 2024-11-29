@@ -4,8 +4,11 @@ from dataclasses import dataclass
 import torch.multiprocessing as mp
 
 from .rasterization import RasterizerConfig
+from .primitives import Camera, Frame
+from .utils import get_projection_matrix
 from gsplat.rendering import rasterization
 import tqdm
+import logging
 
 from typing import List
 
@@ -14,32 +17,7 @@ def tracking_loss(
         gt_img,
         rendered_img,
         ):
-    #! TODO implement
-    return 0.0
-
-def get_projection_matrix():
-    Ks = torch.FloatTensor([
-        [525.0, 0.0, 319.5],
-        [0.0, 525.5, 239.5],
-        [0.0,   0.0,   0.0],
-    ]).unsqueeze(0).cuda()
-    return Ks
-
-
-@dataclass
-class Camera:
-    viewmat: torch.Tensor
-    intrinsics: torch.Tensor
-    height: int
-    width: int
-
-
-@dataclass
-class Frame:
-    img: torch.Tensor
-    timestamp: float
-    camera: Camera
-    kind: str = 'rgb'
+    return (rendered_img - gt_img).abs().sum()
 
 
 # consider the implications of all these structs being torch modules
@@ -121,7 +99,8 @@ class Frontend(mp.Process):
         self.map = GaussianSplattingModel.new_empty_model()
 
         self.initialized: bool = False
-
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel("DEBUG")
 
     def track(self,
               new_frame: Frame):
@@ -169,7 +148,7 @@ class Frontend(mp.Process):
             if not self.queue.empty():
                 message_from_map = self.queue.get()
                 if message_from_map == 'init-success':
-                    print(f"Initialization successful!")
+                    self.logger.debug(f"Initialization successful!")
                     self.sync_maps()
 
             if not self.sensor_queue.empty():
@@ -179,7 +158,10 @@ class Frontend(mp.Process):
 
                 if not self.initialized:
                     self.request_initialization(frame)
+                    self.logger.debug(f'Requested initialization.')
                 else:
+                    self.logger.debug(f'Tracking.')
+                    raise NotImplementedError()
                     self.track(frame)
 
                 # mark the job done

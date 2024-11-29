@@ -2,41 +2,37 @@ from dataclasses import dataclass, field
 from gsplat.strategy import MCMCStrategy, DefaultStrategy
 from typing import Union, Tuple
 
+from .map import GaussianSplattingData, GaussianSplattingMap, MapConfig
+
 import torch
-
-@dataclass
-class BackendConfig:
-
-    densification_strategy: Union[DefaultStrategy, MCMCStrategy] = field (
-        default_factory=DefaultStrategy
-    )
-
-    opacity_regularization: float = 0.0
-    scale_regularization: float = 0.0
-
-    enable_pose_optimization: bool = False
-    pose_optimization_lr: float = 1e-5
-    pose_optimization_regularization = 1e-6
-    pose_noise: float = 0.0
-
-    # background rgb
-    background_color: Tuple[float, 3] = [0.0, 0.0, 0.0]
-
-    initialization_type: str = 'random'
-    initial_number_of_gaussians: int = 30_000
-    initial_extent: float = 3.0
-    initial_opacity: float = 0.1
-    initial_scale: float = 1.0
-    scene_scale: float = 1.0
-
-    device: str = 'cuda:0'
+import logging
 
 
-class Backend(torch.mp.Process):
+class Backend(torch.multiprocessing.Process):
 
-    def __init__(self, backend_config: BackendConfig):
-        self.backend_config = backend_config
+    def __init__(
+            self,
+            map_config: MapConfig,
+            queue: torch.multiprocessing.JoinableQueue,
+            frontend_queue: torch.multiprocessing.JoinableQueue,
+            ):
+        self.map_config = map_config
+        self.queue: torch.multiprocessing.JoinableQueue = queue
+        self.frontend_queue = queue
+        self.map = GaussianSplattingMap(self.map_config)
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel("DEBUG")
 
 
     def run(self):
-        return
+        while True:
+            if self.queue.empty():
+                continue
+            message = self.queue.get()
+            if message == 'request-init':
+                self.map.initialize_map_random()
+                self.map.initialize_optimizers()
+                self.frontend_queue.put('init-done')
+                self.queue.task_done()
+                continue
+            self.logger.debug(f"{message=}")
