@@ -16,9 +16,11 @@ class Backend(torch.multiprocessing.Process):
             queue: torch.multiprocessing.JoinableQueue,
             frontend_queue: torch.multiprocessing.JoinableQueue,
             ):
+
+        super().__init__()
         self.map_config = map_config
         self.queue: torch.multiprocessing.JoinableQueue = queue
-        self.frontend_queue = queue
+        self.frontend_queue = frontend_queue
         self.map = GaussianSplattingMap(self.map_config)
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel("DEBUG")
@@ -30,9 +32,11 @@ class Backend(torch.multiprocessing.Process):
                 continue
             message = self.queue.get()
             if message == 'request-init':
+                self.logger.warning('got init request')
                 self.map.initialize_map_random()
                 self.map.initialize_optimizers()
                 self.frontend_queue.put('init-done')
                 self.queue.task_done()
+                self.logger.warning('initialized')
                 continue
             self.logger.debug(f"{message=}")

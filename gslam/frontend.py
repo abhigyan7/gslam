@@ -1,5 +1,6 @@
 import torch
 from dataclasses import dataclass
+import time
 
 import torch.multiprocessing as mp
 
@@ -55,11 +56,11 @@ class GaussianSplattingModel:
     @staticmethod
     def new_empty_model(device: str = 'cuda'):
         return GaussianSplattingModel(
-            torch.Tensor(device=device),
-            torch.Tensor(device=device),
-            torch.Tensor(device=device),
-            torch.Tensor(device=device),
-            torch.Tensor(device=device),
+            torch.tensor([], device=device),
+            torch.tensor([], device=device),
+            torch.tensor([], device=device),
+            torch.tensor([], device=device),
+            torch.tensor([], device=device),
         )
 
 
@@ -90,6 +91,7 @@ class Frontend(mp.Process):
                  frontend_queue: mp.JoinableQueue,
                  sensor_queue: mp.JoinableQueue):
 
+        super().__init__()
         self.tracking_config: TrackingConfig = tracking_conf
         self.rasterizer_conf: RasterizerConfig = rasterizer_conf
         self.map_queue: mp.JoinableQueue = backend_queue
@@ -101,6 +103,8 @@ class Frontend(mp.Process):
         self.initialized: bool = False
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel("DEBUG")
+
+        self.sensor_queue = sensor_queue
 
     def track(self,
               new_frame: Frame):
@@ -138,7 +142,11 @@ class Frontend(mp.Process):
 
 
     def run(self):
-        self.Ks = get_projection_matrix().to(self.config.device)
+        self.Ks = get_projection_matrix().to(self.tracking_config.device)
+
+        self.logger.warning("test")
+
+        self.requested_init = False
 
         tic = torch.cuda.Event(enable_timing=True)
         toc = torch.cuda.Event(enable_timing=True)
@@ -147,9 +155,13 @@ class Frontend(mp.Process):
 
             if not self.queue.empty():
                 message_from_map = self.queue.get()
-                if message_from_map == 'init-success':
-                    self.logger.debug(f"Initialization successful!")
+                if message_from_map == 'init-done':
+                    self.logger.warning(f"Initialization successful!")
                     self.sync_maps()
+                    self.initialized = True
+
+            if self.requested_init and not self.initialized:
+                continue
 
             if not self.sensor_queue.empty():
 
@@ -158,9 +170,11 @@ class Frontend(mp.Process):
 
                 if not self.initialized:
                     self.request_initialization(frame)
-                    self.logger.debug(f'Requested initialization.')
+                    self.logger.warning(f'Requested initialization.')
+                    self.requested_init = True
+                    self.keyframes.append(frame)
                 else:
-                    self.logger.debug(f'Tracking.')
+                    self.logger.warning(f'Tracking.')
                     raise NotImplementedError()
                     self.track(frame)
 

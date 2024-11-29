@@ -57,12 +57,13 @@ class TumRGB:
 class RGBSensorStream(Process):
 
     def __init__(self, dataset, queue):
+        super().__init__()
         self.dataset = dataset
         self.queue = queue
 
     def run(self):
         for data in iter(self.dataset):
-            while len(queue) > 10:
+            while self.queue.qsize() > 10:
                 # preventing choke
                 continue
             self.queue.put(data)

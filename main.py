@@ -30,8 +30,13 @@ def main():
         backend_to_frontend_queue,
     )
 
-    sensor_stream_process.run()
-    backend_process.run()
-    frontend_process.run()
+    sensor_stream_process.start()
+    backend_process.start()
+    frontend_process.start()
 
     frontend_process.join()
+
+
+if __name__ == '__main__':
+    mp.set_start_method('spawn')
+    main()

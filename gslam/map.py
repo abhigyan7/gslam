@@ -46,6 +46,7 @@ class GaussianSplattingData(torch.nn.Module):
                  covar_scales, # scales of covariance matrices
                  opacities,    # alpha of gaussians
                  colors):      # RGB values of gaussians
+        super().__init__()
         self.means: torch.nn.Parameter = torch.nn.Parameter(means)
         self.covar_quats: torch.nn.Parameter = torch.nn.Parameter(covar_quats)
         self.covar_scales: torch.nn.Parameter = torch.nn.Parameter(covar_scales)
@@ -96,7 +97,7 @@ class GaussianSplattingMap:
                  map_config: MapConfig,
                  data: GaussianSplattingData = None,):
         self.data = data
-        self.config = map_config
+        self.map_conf = map_config
         return
 
 
@@ -119,10 +120,10 @@ class GaussianSplattingMap:
         # TODO fix these LRs
         self.optimizers: Dict[str, torch.optim.Optimizer] = {}
         self.optimizers['means'] = torch.optim.Adam(params=[self.map.means,], lr=0.001)
-        self.optimizers['quats'] = torch.optim.Adam(params=[self.map.quats,], lr=0.001)
-        self.optimizers['scales'] = torch.optim.Adam(params=[self.map.scales,], lr=0.001)
+        self.optimizers['quats'] = torch.optim.Adam(params=[self.map.covar_quats,], lr=0.001)
+        self.optimizers['scales'] = torch.optim.Adam(params=[self.map.covar_scales,], lr=0.001)
         self.optimizers['opacities'] = torch.optim.Adam(params=[self.map.opacities,], lr=0.001)
-        self.optimizers['rgbs'] = torch.optim.Adam(params=[self.map.rgbs,], lr=0.001)
+        self.optimizers['rgbs'] = torch.optim.Adam(params=[self.map.colors,], lr=0.001)
 
 
     def zero_grad(self,):
