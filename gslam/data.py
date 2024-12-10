@@ -6,6 +6,8 @@ from PIL import Image
 from pyquaternion import Quaternion
 
 from torch.multiprocessing import Process, JoinableQueue
+import torch
+from .primitives import Frame, Camera, Pose
 
 
 class TumRGB:
@@ -50,8 +52,18 @@ class TumRGB:
         filename = self.sequence_dir / self.rgb_frame_filenames[idx]
         image = np.asarray(Image.open(filename))
         image = np.float32(image) / 255.0
-        pose = self.poses[idx, ...]
-        return image, pose, self.rgb_frame_timestamps[idx]
+        image = torch.Tensor(image).cuda()
+        height, width, channels = image.shape
+        gt_pose = self.poses[idx, ...]
+        ts = self.rgb_frame_timestamps[idx]
+        Ks = torch.FloatTensor([
+            [525.0, 0.0, 319.5],
+            [0.0, 525.5, 239.5],
+            [0.0,   0.0,   0.0],
+        ]).cuda().unsqueeze(0)
+        camera = Camera(Ks, height, width)
+        frame = Frame(image, ts, camera, Pose(), gt_pose)
+        return frame
 
 
 class RGBSensorStream(Process):

@@ -38,5 +38,12 @@ class Backend(torch.multiprocessing.Process):
                 self.frontend_queue.put('init-done')
                 self.queue.task_done()
                 self.logger.warning('initialized')
+                self.sync_with_frontend()
                 continue
             self.logger.debug(f"{message=}")
+
+
+    def sync_with_frontend(self):
+        self.frontend_queue.put(
+            ('map-sync', self.map.data.clone(),)
+        )

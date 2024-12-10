@@ -6,7 +6,7 @@ from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat.rendering import rasterization
 
 from .utils import knn
-from .primitives import Camera
+from .primitives import Camera, Pose
 
 
 @dataclass
@@ -55,14 +55,14 @@ class GaussianSplattingData(torch.nn.Module):
 
 
     def forward(self,
-               camera: Camera) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
+               camera: Camera, pose: Pose) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
         rendered_rgb, rendered_alpha, render_info = rasterization(
             means = self.means,
             quats = self.covar_quats,
             scales = self.covar_scales,
             opacities = self.opacities,
             colors = self.colors,
-            viewmats = camera.viewmat.unsqueeze(0),
+            viewmats = pose(),
             Ks = camera.intrinsics,
             width = camera.width,
             height = camera.height,
@@ -71,13 +71,13 @@ class GaussianSplattingData(torch.nn.Module):
 
 
     @staticmethod
-    def new_empty_model():
+    def new_empty_model(device: str = 'cuda'):
         return GaussianSplattingData(
-            torch.Tensor(),
-            torch.Tensor(),
-            torch.Tensor(),
-            torch.Tensor(),
-            torch.Tensor(),
+            torch.tensor([], device=device),
+            torch.tensor([], device=device),
+            torch.tensor([], device=device),
+            torch.tensor([], device=device),
+            torch.tensor([], device=device),
         )
 
 
@@ -89,6 +89,22 @@ class GaussianSplattingData(torch.nn.Module):
             self.opacities.clone().detach(),
             self.colors.clone().detach(),
         )
+
+
+    # don't use this
+    def __initialize_map_random(self, map_conf: MapConfig):
+        points = torch.rand( (map_conf.initial_number_of_gaussians, 3) ) * 2.0 - 1.0
+        points *= map_conf.initial_extent * map_conf.scene_scale
+        rgbs = torch.rand( (map_conf.initial_number_of_gaussians, 3) )
+
+        avg_distance_to_nearest_3_neighbors = torch.sqrt( knn(points, 4)[:, 1:] ** 2 ).mean(dim=-1)
+        scales = torch.log(avg_distance_to_nearest_3_neighbors * map_conf.initial_scale).unsqueeze(-1).repeat(1, 3)
+
+        N = points.shape[0]
+        quats = torch.rand( (N, 4) )
+        opacities = torch.logit( torch.full( (N,), map_conf.initial_opacity ))
+
+        self = GaussianSplattingData(points, quats, scales, opacities, rgbs)
 
 
 class GaussianSplattingMap:
@@ -113,17 +129,17 @@ class GaussianSplattingMap:
         quats = torch.rand( (N, 4) )
         opacities = torch.logit( torch.full( (N,), self.map_conf.initial_opacity ))
 
-        self.map = GaussianSplattingData(points, quats, scales, opacities, rgbs).to(self.map_conf.device)
+        self.data= GaussianSplattingData(points, quats, scales, opacities, rgbs).to(self.map_conf.device)
 
 
     def initialize_optimizers(self,):
         # TODO fix these LRs
         self.optimizers: Dict[str, torch.optim.Optimizer] = {}
-        self.optimizers['means'] = torch.optim.Adam(params=[self.map.means,], lr=0.001)
-        self.optimizers['quats'] = torch.optim.Adam(params=[self.map.covar_quats,], lr=0.001)
-        self.optimizers['scales'] = torch.optim.Adam(params=[self.map.covar_scales,], lr=0.001)
-        self.optimizers['opacities'] = torch.optim.Adam(params=[self.map.opacities,], lr=0.001)
-        self.optimizers['rgbs'] = torch.optim.Adam(params=[self.map.colors,], lr=0.001)
+        self.optimizers['means'] = torch.optim.Adam(params=[self.data.means,], lr=0.001)
+        self.optimizers['quats'] = torch.optim.Adam(params=[self.data.covar_quats,], lr=0.001)
+        self.optimizers['scales'] = torch.optim.Adam(params=[self.data.covar_scales,], lr=0.001)
+        self.optimizers['opacities'] = torch.optim.Adam(params=[self.data.opacities,], lr=0.001)
+        self.optimizers['rgbs'] = torch.optim.Adam(params=[self.data.colors,], lr=0.001)
 
 
     def zero_grad(self,):
