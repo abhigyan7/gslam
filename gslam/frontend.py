@@ -6,7 +6,7 @@ import torch.multiprocessing as mp
 
 from .rasterization import RasterizerConfig
 from .primitives import Camera, Frame, Pose
-from .utils import get_projection_matrix
+from .utils import get_projection_matrix, torch_to_pil
 from .map import GaussianSplattingData
 from gsplat.rendering import rasterization
 import tqdm
@@ -26,7 +26,7 @@ def tracking_loss(
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 30000
+    num_tracking_iters: int = 3000
 
     photometric_loss: str = 'l1'
 
@@ -79,12 +79,19 @@ class Frontend(mp.Process):
 
             pbar.set_description(f"loss: {loss.item()}")
 
+
+        torch_to_pil(rendered_rgb).save(f'tracking_{len(self.keyframes)}.png')
+
         return new_frame.pose()
 
 
     def request_initialization(self, frame: Frame):
         assert not self.initialized
-        self.map_queue.put('request-init')
+        self.map_queue.put(['request-init', deepcopy(frame)])
+
+    def add_keyframe(self, frame: Frame):
+        assert self.initialized
+        self.map_queue.put(['add-keyframe', deepcopy(frame)])
 
 
     def sync_maps(self):
@@ -110,11 +117,12 @@ class Frontend(mp.Process):
                 message_from_map = self.queue.get()
                 if message_from_map == 'init-done':
                     self.logger.warning(f"Initialization successful!")
-                    self.sync_maps()
                 elif type(message_from_map) == tuple and message_from_map[0] == 'map-sync':
-                    self.splats = message_from_map[1]
+                    self.splats, self.keyframes = message_from_map[1:]
                     self.logger.warning('Map synced')
                     self.initialized = True
+                else:
+                    self.logger.warning(f"{message_from_map=}")
 
             if self.requested_init and not self.initialized:
                 continue
@@ -122,7 +130,7 @@ class Frontend(mp.Process):
             if not self.sensor_queue.empty():
 
                 # remove an item from the queue
-                frame = self.sensor_queue.get()
+                frame = self.sensor_queue.get().to(self.tracking_config.device)
 
                 if not self.initialized:
                     self.request_initialization(frame)
@@ -132,6 +140,7 @@ class Frontend(mp.Process):
                 else:
                     self.logger.warning(f'Tracking.')
                     self.track(frame)
+                    self.add_keyframe(frame)
 
                 # mark the job done
                 self.sensor_queue.task_done()

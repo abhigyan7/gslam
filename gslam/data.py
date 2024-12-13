@@ -54,7 +54,7 @@ class TumRGB:
         image = np.float32(image) / 255.0
         image = torch.Tensor(image).cuda()
         height, width, channels = image.shape
-        gt_pose = self.poses[idx, ...]
+        gt_pose = torch.Tensor(self.poses[idx, ...])
         ts = self.rgb_frame_timestamps[idx]
         Ks = torch.FloatTensor([
             [525.0, 0.0, 319.5],

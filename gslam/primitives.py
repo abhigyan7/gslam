@@ -71,6 +71,10 @@ class Camera:
     height: int
     width: int
 
+    def to(self, device):
+        self.intrinsics = self.intrinsics.to(device)
+        return self
+
 
 @dataclass
 class Frame:
@@ -79,3 +83,10 @@ class Frame:
     camera: Camera
     pose: Pose
     gt_pose: torch.Tensor
+
+    def to(self, device):
+        self.camera = self.camera.to(device)
+        self.pose = self.pose.to(device)
+        self.gt_pose = self.gt_pose.to(device)
+        self.img = self.img.to(device)
+        return self

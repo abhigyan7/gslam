@@ -107,6 +107,7 @@ class GaussianSplattingData(torch.nn.Module):
         self = GaussianSplattingData(points, quats, scales, opacities, rgbs)
 
 
+# consider the implications of all these structs being torch modules
 class GaussianSplattingMap:
 
     def __init__(self,
@@ -129,7 +130,7 @@ class GaussianSplattingMap:
         quats = torch.rand( (N, 4) )
         opacities = torch.logit( torch.full( (N,), self.map_conf.initial_opacity ))
 
-        self.data= GaussianSplattingData(points, quats, scales, opacities, rgbs).to(self.map_conf.device)
+        self.data = GaussianSplattingData(points, quats, scales, opacities, rgbs).to(self.map_conf.device)
 
 
     def initialize_optimizers(self,):
