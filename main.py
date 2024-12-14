@@ -1,15 +1,13 @@
-from gslam.data import TumRGB, RGBSensorStream
-from gslam.frontend import Frontend, TrackingConfig
-from gslam.primitives import Frame, Camera
-
-from gslam.map import MapConfig
-from gslam.backend import Backend
-from gslam.rasterization import RasterizerConfig
-
 from torch import multiprocessing as mp
 
-def main():
+from gslam.backend import Backend
+from gslam.data import RGBSensorStream, TumRGB
+from gslam.frontend import Frontend, TrackingConfig
+from gslam.map import MapConfig
+from gslam.rasterization import RasterizerConfig
 
+
+def main():
     tum_dataset = TumRGB('../datasets/tum/rgbd_dataset_freiburg1_desk')
 
     dataset_queue = mp.JoinableQueue()
@@ -24,7 +22,7 @@ def main():
         dataset_queue,
     )
 
-    backend_process =  Backend(
+    backend_process = Backend(
         MapConfig(),
         frontend_to_backend_queue,
         backend_to_frontend_queue,

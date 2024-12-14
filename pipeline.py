@@ -1,8 +1,8 @@
-from typing import Tuple, Dict, Union
 from dataclasses import dataclass, field
+from typing import Dict, Tuple, Union
 
-import tqdm
 import torch
+import tqdm
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 
@@ -12,8 +12,7 @@ from gslam.utils import knn, torch_to_pil
 
 @dataclass
 class MapConfig:
-
-    densification_strategy: Union[DefaultStrategy, MCMCStrategy] = field (
+    densification_strategy: Union[DefaultStrategy, MCMCStrategy] = field(
         default_factory=DefaultStrategy
     )
 
@@ -41,17 +40,22 @@ class MapConfig:
 def initialize_map(
     map_conf: MapConfig,
 ) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
-
-    points = torch.rand( (map_conf.initial_number_of_gaussians, 3) ) * 2.0 - 1.0
+    points = torch.rand((map_conf.initial_number_of_gaussians, 3)) * 2.0 - 1.0
     points *= map_conf.initial_extent * map_conf.scene_scale
-    rgbs = torch.rand( (map_conf.initial_number_of_gaussians, 3) )
+    rgbs = torch.rand((map_conf.initial_number_of_gaussians, 3))
 
-    avg_distance_to_nearest_3_neighbors = torch.sqrt( knn(points, 4)[:, 1:] ** 2 ).mean(dim=-1)
-    scales = torch.log(avg_distance_to_nearest_3_neighbors * map_conf.initial_scale).unsqueeze(-1).repeat(1, 3)
+    avg_distance_to_nearest_3_neighbors = torch.sqrt(knn(points, 4)[:, 1:] ** 2).mean(
+        dim=-1
+    )
+    scales = (
+        torch.log(avg_distance_to_nearest_3_neighbors * map_conf.initial_scale)
+        .unsqueeze(-1)
+        .repeat(1, 3)
+    )
 
     N = points.shape[0]
-    quats = torch.rand( (N, 4) )
-    opacities = torch.logit( torch.full( (N,), map_conf.initial_opacity ))
+    quats = torch.rand((N, 4))
+    opacities = torch.logit(torch.full((N,), map_conf.initial_opacity))
 
     params = [
         ('means', torch.nn.Parameter(points), 1.6e-4 * map_conf.scene_scale),
@@ -67,55 +71,64 @@ def initialize_map(
 
     optimizers = {
         name: torch.optim.Adam(
-            params=[params_dict[name],], lr=lr,
-        ) for name, value, lr in params
+            params=[
+                params_dict[name],
+            ],
+            lr=lr,
+        )
+        for name, value, lr in params
     }
     return params_dict, optimizers
 
 
 def main():
-
     tum_dataset = TumRGB('../datasets/tum/rgbd_dataset_freiburg1_desk')
     gt_img, camtoworld, timestamps = tum_dataset[0]
     gt_img = torch.FloatTensor(gt_img).cuda().unsqueeze(0)
     camtoworld = torch.eye(4)
     _, height, width, _ = gt_img.shape
     viewmats = torch.linalg.inv(torch.FloatTensor(camtoworld).unsqueeze(0).cuda())
-    Ks = torch.FloatTensor([
-        [525.0, 0.0, 319.5],
-        [0.0, 525.5, 239.5],
-        [0.0,   0.0,   0.0],
-    ]).unsqueeze(0).cuda()
+    Ks = (
+        torch.FloatTensor(
+            [
+                [525.0, 0.0, 319.5],
+                [0.0, 525.5, 239.5],
+                [0.0, 0.0, 0.0],
+            ]
+        )
+        .unsqueeze(0)
+        .cuda()
+    )
 
     splats, optimizers = initialize_map(MapConfig())
     print("Model initialized. Number of GS:", len(splats["means"]))
 
     render_colors, render_alphas, info = rasterization(
-        means = splats['means'],
-        quats = splats['quats'],
-        scales = splats['scales'],
-        opacities = splats['opacities'],
-        colors = splats['colors'],
-        viewmats = viewmats,
-        Ks = Ks,
-        width = width,
-        height = height,
+        means=splats['means'],
+        quats=splats['quats'],
+        scales=splats['scales'],
+        opacities=splats['opacities'],
+        colors=splats['colors'],
+        viewmats=viewmats,
+        Ks=Ks,
+        width=width,
+        height=height,
     )
 
     for _ in (pbar := tqdm.tqdm(range(10000))):
-        for _,optimizer in optimizers.items():
+        for _, optimizer in optimizers.items():
             optimizer.zero_grad()
 
         render_colors, render_alphas, info = rasterization(
-            means = splats['means'],
-            quats = splats['quats'],
-            scales = splats['scales'],
-            opacities = splats['opacities'],
-            colors = splats['colors'],
-            viewmats = viewmats,
-            Ks = Ks,
-            width = width,
-            height = height,
+            means=splats['means'],
+            quats=splats['quats'],
+            scales=splats['scales'],
+            opacities=splats['opacities'],
+            colors=splats['colors'],
+            viewmats=viewmats,
+            Ks=Ks,
+            width=width,
+            height=height,
         )
 
         l1loss = (render_colors - gt_img).abs().sum()

@@ -1,13 +1,12 @@
 from pathlib import Path
-import time
 
 import numpy as np
+import torch
 from PIL import Image
 from pyquaternion import Quaternion
+from torch.multiprocessing import JoinableQueue, Process
 
-from torch.multiprocessing import Process, JoinableQueue
-import torch
-from .primitives import Frame, Camera, Pose
+from .primitives import Camera, Frame, Pose
 
 
 class TumRGB:
@@ -56,18 +55,23 @@ class TumRGB:
         height, width, channels = image.shape
         gt_pose = torch.Tensor(self.poses[idx, ...])
         ts = self.rgb_frame_timestamps[idx]
-        Ks = torch.FloatTensor([
-            [525.0, 0.0, 319.5],
-            [0.0, 525.5, 239.5],
-            [0.0,   0.0,   0.0],
-        ]).cuda().unsqueeze(0)
+        Ks = (
+            torch.FloatTensor(
+                [
+                    [525.0, 0.0, 319.5],
+                    [0.0, 525.5, 239.5],
+                    [0.0, 0.0, 0.0],
+                ]
+            )
+            .cuda()
+            .unsqueeze(0)
+        )
         camera = Camera(Ks, height, width)
         frame = Frame(image, ts, camera, Pose(), gt_pose)
         return frame
 
 
 class RGBSensorStream(Process):
-
     def __init__(self, dataset, queue):
         super().__init__()
         self.dataset = dataset

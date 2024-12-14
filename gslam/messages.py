@@ -1,14 +1,12 @@
 from enum import StrEnum, auto
 
-class TrackerMessage(StrEnum):
+
+class FrontendMessage(StrEnum):
     REQUEST_INITIALIZE = auto()
-    REQUEST_RESET = auto()
-    REQUEST_STOP = auto()
+    ADD_KEYFRAME = auto()
     REQUEST_SYNC = auto()
 
 
-class MapMessage(StrEnum):
-    ACKNOWLEDGE_STOP = auto()
-    REQUEST_RESET = auto()
-    REQUEST_STOP = auto()
-    ACKNOWLEDGE_INITIALIZE = auto()
+class BackendMessage(StrEnum):
+    SIGNAL_INITIALIZED = auto()
+    SYNC = auto()
