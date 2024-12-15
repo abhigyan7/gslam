@@ -10,7 +10,7 @@ from .primitives import Camera, Frame, Pose
 
 
 class TumRGB:
-    def __init__(self, sequence_dir: Path):
+    def __init__(self, sequence_dir: Path, seq_len: int = -1):
         self.sequence_dir = Path(sequence_dir)
 
         rgb_frames = np.loadtxt(self.sequence_dir / "rgb.txt", np.str_)
@@ -44,15 +44,21 @@ class TumRGB:
         self.poses[..., :3, :3] = gt_rotation_matrices
         self.poses[..., :3, 3] = gt_translations
 
+        self.length = self.num_frames
+        if seq_len > 0:
+            self.length = seq_len
+
     def __len__(self):
-        return self.num_frames
+        return self.length
 
     def __getitem__(self, idx):
+        if idx >= len(self):
+            raise StopIteration
         filename = self.sequence_dir / self.rgb_frame_filenames[idx]
         image = np.asarray(Image.open(filename))
         image = np.float32(image) / 255.0
-        image = torch.Tensor(image).cuda()
-        height, width, channels = image.shape
+        image = torch.Tensor(image).cuda().unsqueeze(0)
+        _, height, width, _channels = image.shape
         gt_pose = torch.Tensor(self.poses[idx, ...])
         ts = self.rgb_frame_timestamps[idx]
         Ks = (
@@ -77,12 +83,16 @@ class RGBSensorStream(Process):
         self.dataset = dataset
         self.queue = queue
 
+    # @rr.shutdown_at_exit
     def run(self):
         for data in iter(self.dataset):
             while self.queue.qsize() > 10:
                 # preventing choke
                 continue
             self.queue.put(data)
+
+        while True:
+            continue
 
 
 if __name__ == "__main__":

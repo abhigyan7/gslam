@@ -11,7 +11,9 @@ from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame
 from .rasterization import RasterizerConfig
-from .utils import get_projection_matrix, q_get, torch_to_pil
+from .utils import get_projection_matrix, q_get, torch_to_pil, torch_image_to_np
+
+import rerun as rr
 
 
 def tracking_loss(
@@ -24,7 +26,7 @@ def tracking_loss(
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 3000
+    num_tracking_iters: int = 150
 
     photometric_loss: str = 'l1'
 
@@ -39,6 +41,7 @@ class Frontend(mp.Process):
         backend_queue: mp.Queue,
         frontend_queue: mp.Queue,
         sensor_queue: mp.Queue,
+        rerun_recording_stream: rr.RecordingStream = None,
     ):
         super().__init__()
         self.tracking_config: TrackingConfig = tracking_conf
@@ -55,6 +58,7 @@ class Frontend(mp.Process):
         self.logger.setLevel("DEBUG")
 
         self.sensor_queue = sensor_queue
+        self.rr = rerun_recording_stream
 
     def track(self, new_frame: Frame):
         self.logger.warning(f" Tracking frame, ts={new_frame.timestamp}")
@@ -76,7 +80,24 @@ class Frontend(mp.Process):
             loss.backward()
             pose_optimizer.step()
 
+            rr.log(
+                'frontend/tracking/loss',
+                rr.Scalar(loss.item()),
+            )
+
             pbar.set_description(f"loss: {loss.item()}")
+
+        rr.log(
+            'frontend/tracking/rendered_img',
+            rr.Image(torch_image_to_np(rendered_rgb)).compress(95),
+        )
+
+        rr.log(
+            'frontend/tracking/gt_img',
+            rr.Image(torch_image_to_np(new_frame.img)).compress(95),
+        )
+
+        self.logger.warning(f"{new_frame.img.shape=}, {rendered_rgb.shape=}")
 
         torch_to_pil(rendered_rgb).save(f'tracking_{len(self.keyframes)}.png')
 
@@ -96,7 +117,10 @@ class Frontend(mp.Process):
         self.splats, self.keyframes = splats, keyframes
         return
 
+    @rr.shutdown_at_exit
     def run(self):
+        rr.init('gslam', recording_id='gslam_1')
+        rr.save('runs/rr.rrd')
         self.Ks = get_projection_matrix().to(self.tracking_config.device)
 
         self.logger.warning("test")
@@ -105,21 +129,22 @@ class Frontend(mp.Process):
             match q_get(self.queue):
                 case [BackendMessage.SIGNAL_INITIALIZED]:
                     self.logger.warning("Initialization successful!")
-                    self.initialized = True
-                case [BackendMessage.Sync, map_data, keyframes]:
+                case [BackendMessage.SYNC, map_data, keyframes]:
                     self.sync_maps(map_data, keyframes)
+                    self.initialized = True
                 case None:
-                    continue
+                    pass
                 case message_from_map:
                     self.logger.warning(f"Unknown {message_from_map=}")
 
             if self.requested_init and not self.initialized:
                 continue
 
-            frame = q_get(self.sensor_queue)
+            frame: Frame = q_get(self.sensor_queue)
             if frame is None:
                 continue
 
+            frame = frame.to(self.tracking_config.device)
             if not self.initialized:
                 self.request_initialization(frame)
                 self.requested_init = True

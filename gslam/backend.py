@@ -11,6 +11,8 @@ from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame
 from .utils import q_get, torch_to_pil
 
+import rerun as rr
+
 
 class Backend(torch.multiprocessing.Process):
     def __init__(
@@ -29,7 +31,7 @@ class Backend(torch.multiprocessing.Process):
         self.keyframes: List[Frame] = []
 
     def optimize_map(self):
-        for _ in (pbar := tqdm.tqdm(range(15000))):
+        for _ in (pbar := tqdm.tqdm(range(1500))):
             self.map.zero_grad()
 
             (random_keyframe,) = random.sample(self.keyframes, 1)
@@ -41,6 +43,11 @@ class Backend(torch.multiprocessing.Process):
 
             l1loss = (render_colors - self.keyframes[0].img).abs().sum()
             l1loss.backward()
+
+            rr.log(
+                'backend/global_optim/loss',
+                rr.Scalar(l1loss.item()),
+            )
 
             desc = f"loss={l1loss.item():.3f}"
             pbar.set_description(desc)
@@ -74,16 +81,19 @@ class Backend(torch.multiprocessing.Process):
         self.queue.task_done()
         self.logger.warning('done adding keyframe')
 
+    # @rr.shutdown_at_exit
     def run(self):
+        # rr.init('gslam', recording_id='gslam_1')
+        # rr.save('runs/rr.rrd')
         while True:
             match q_get(self.queue):
                 case [FrontendMessage.REQUEST_INITIALIZE, frame]:
                     self.initialize(frame)
-                    self.frontend_queue.put(BackendMessage.SIGNAL_INITIALIZED)
+                    self.frontend_queue.put([BackendMessage.SIGNAL_INITIALIZED])
                     self.sync_with_frontend()
                 case [FrontendMessage.ADD_KEYFRAME, frame]:
                     self.sync_with_frontend()
                 case None:
-                    continue
+                    pass
                 case message_from_frontend:
                     self.logger.warning(f"Unknown {message_from_frontend}")

@@ -6,14 +6,24 @@ from gslam.frontend import Frontend, TrackingConfig
 from gslam.map import MapConfig
 from gslam.rasterization import RasterizerConfig
 
+import sys
+import gc
 
-def main():
-    tum_dataset = TumRGB('../datasets/tum/rgbd_dataset_freiburg1_desk')
+
+# @rr.shutdown_at_exit
+def main(seq_len: int = -1):
+    tum_dataset = TumRGB('../datasets/tum/rgbd_dataset_freiburg1_desk', seq_len)
 
     dataset_queue = mp.JoinableQueue()
     frontend_to_backend_queue = mp.JoinableQueue()
     backend_to_frontend_queue = mp.JoinableQueue()
+
+    # rr.init('gslam', recording_id='gslam_1')
+    # rr.save('runs/rr.rrd')
+
+    gc.collect()
     sensor_stream_process = RGBSensorStream(tum_dataset, dataset_queue)
+
     frontend_process = Frontend(
         TrackingConfig(),
         RasterizerConfig(),
@@ -33,8 +43,13 @@ def main():
     frontend_process.start()
 
     frontend_process.join()
+    backend_process.join()
+    sensor_stream_process.join()
 
 
 if __name__ == '__main__':
     mp.set_start_method('spawn')
-    main()
+    seq_len = -1
+    if len(sys.argv) > 1:
+        seq_len = int(sys.argv[1])
+    main(seq_len)
