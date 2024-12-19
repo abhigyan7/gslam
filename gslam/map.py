@@ -54,8 +54,12 @@ class GaussianSplattingData(torch.nn.Module):
         self.colors: torch.nn.Parameter = torch.nn.Parameter(colors)
 
     def forward(
-        self, camera: Camera, pose: Pose
+        self,
+        camera: Camera,
+        pose: Pose,
+        render_depth: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
+        render_mode = 'RGB+D' if render_depth else 'RGB'
         rendered_rgb, rendered_alpha, render_info = rasterization(
             means=self.means,
             quats=self.covar_quats,
@@ -66,6 +70,7 @@ class GaussianSplattingData(torch.nn.Module):
             Ks=camera.intrinsics,
             width=camera.width,
             height=camera.height,
+            render_mode=render_mode,
         )
         return rendered_rgb, rendered_alpha, render_info
 

@@ -1,17 +1,17 @@
 import logging
 import random
+import threading
 from copy import deepcopy
 from typing import List
 
 import torch
 import tqdm
 
+from gsplat.strategy import DefaultStrategy, MCMCStrategy
+
 from .map import GaussianSplattingMap, MapConfig
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame
-from .utils import q_get, torch_to_pil
-
-import rerun as rr
 
 
 class Backend(torch.multiprocessing.Process):
@@ -20,6 +20,8 @@ class Backend(torch.multiprocessing.Process):
         map_config: MapConfig,
         queue: torch.multiprocessing.Queue,
         frontend_queue: torch.multiprocessing.Queue,
+        backend_done_event: threading.Event,
+        strategy: DefaultStrategy | MCMCStrategy,
     ):
         super().__init__()
         self.map_config = map_config
@@ -29,9 +31,11 @@ class Backend(torch.multiprocessing.Process):
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel("DEBUG")
         self.keyframes: List[Frame] = []
+        self.backend_done_event = backend_done_event
+        self.strategy = strategy
 
     def optimize_map(self):
-        for _ in (pbar := tqdm.tqdm(range(1500))):
+        for step in (pbar := tqdm.tqdm(range(1200))):
             self.map.zero_grad()
 
             (random_keyframe,) = random.sample(self.keyframes, 1)
@@ -41,20 +45,30 @@ class Backend(torch.multiprocessing.Process):
                 random_keyframe.pose,
             )
 
-            l1loss = (render_colors - self.keyframes[0].img).abs().sum()
-            l1loss.backward()
-
-            rr.log(
-                'backend/global_optim/loss',
-                rr.Scalar(l1loss.item()),
+            self.strategy.step_pre_backward(
+                self.get_params_dict(),
+                self.get_optimizers_dict(),
+                self.strategy_state,
+                step,
+                _info,
             )
+
+            l1loss = (render_colors - self.keyframes[0].img).abs().mean()
+            l1loss.backward()
 
             desc = f"loss={l1loss.item():.3f}"
             pbar.set_description(desc)
 
-            self.map.step()
+            self.strategy.step_post_backward(
+                self.get_params_dict(),
+                self.get_optimizers_dict(),
+                self.strategy_state,
+                step,
+                _info,
+                lr=0.0003,
+            )
 
-        torch_to_pil(render_colors).save(f'out_{len(self.keyframes)}.png')
+            self.map.step()
 
         return
 
@@ -64,11 +78,33 @@ class Backend(torch.multiprocessing.Process):
         )
         return
 
+    def get_params_dict(
+        self,
+    ):
+        return {
+            'means': self.map.data.means,
+            'scales': self.map.data.covar_scales,
+            'quats': self.map.data.covar_quats,
+            'rgbs': self.map.data.colors,
+            'opacities': self.map.data.opacities,
+        }
+
+    def get_optimizers_dict(self):
+        return self.map.optimizers
+
+    def initialize_densification(self):
+        params = self.get_params_dict()
+        optimizers = self.get_optimizers_dict()
+        self.strategy.check_sanity(params, optimizers)
+        self.strategy_state = self.strategy.initialize_state()
+        return
+
     def initialize(self, frame):
         self.logger.warning('Initializing')
         self.keyframes = [frame]
         self.map.initialize_map_random()
         self.map.initialize_optimizers()
+        self.initialize_densification()
         self.optimize_map()
         self.queue.task_done()
         self.logger.warning('Initialized')
@@ -86,14 +122,19 @@ class Backend(torch.multiprocessing.Process):
         # rr.init('gslam', recording_id='gslam_1')
         # rr.save('runs/rr.rrd')
         while True:
-            match q_get(self.queue):
+            if self.queue.empty():
+                continue
+            match self.queue.get():
                 case [FrontendMessage.REQUEST_INITIALIZE, frame]:
                     self.initialize(frame)
                     self.frontend_queue.put([BackendMessage.SIGNAL_INITIALIZED])
                     self.sync_with_frontend()
                 case [FrontendMessage.ADD_KEYFRAME, frame]:
+                    self.add_keyframe(frame)
                     self.sync_with_frontend()
                 case None:
-                    pass
+                    break
                 case message_from_frontend:
                     self.logger.warning(f"Unknown {message_from_frontend}")
+
+        self.backend_done_event.set()

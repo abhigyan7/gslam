@@ -5,6 +5,7 @@ import torch
 from PIL import Image
 from pyquaternion import Quaternion
 from torch.multiprocessing import JoinableQueue, Process
+from threading import Event
 
 from .primitives import Camera, Frame, Pose
 
@@ -78,10 +79,11 @@ class TumRGB:
 
 
 class RGBSensorStream(Process):
-    def __init__(self, dataset, queue):
+    def __init__(self, dataset, queue, frontend_done_event):
         super().__init__()
         self.dataset = dataset
         self.queue = queue
+        self.frontend_done_event: Event = frontend_done_event
 
     # @rr.shutdown_at_exit
     def run(self):
@@ -90,9 +92,9 @@ class RGBSensorStream(Process):
                 # preventing choke
                 continue
             self.queue.put(data)
-
-        while True:
-            continue
+        self.queue.put(None)
+        self.frontend_done_event.wait()
+        return
 
 
 if __name__ == "__main__":

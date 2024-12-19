@@ -5,6 +5,7 @@ from gslam.data import RGBSensorStream, TumRGB
 from gslam.frontend import Frontend, TrackingConfig
 from gslam.map import MapConfig
 from gslam.rasterization import RasterizerConfig
+from gsplat.strategy import MCMCStrategy
 
 import sys
 import gc
@@ -21,8 +22,13 @@ def main(seq_len: int = -1):
     # rr.init('gslam', recording_id='gslam_1')
     # rr.save('runs/rr.rrd')
 
+    frontend_done_event = mp.Event()
+    backend_done_event = mp.Event()
+
     gc.collect()
-    sensor_stream_process = RGBSensorStream(tum_dataset, dataset_queue)
+    sensor_stream_process = RGBSensorStream(
+        tum_dataset, dataset_queue, frontend_done_event
+    )
 
     frontend_process = Frontend(
         TrackingConfig(),
@@ -30,12 +36,16 @@ def main(seq_len: int = -1):
         frontend_to_backend_queue,
         backend_to_frontend_queue,
         dataset_queue,
+        frontend_done_event,
+        backend_done_event,
     )
 
     backend_process = Backend(
         MapConfig(),
         frontend_to_backend_queue,
         backend_to_frontend_queue,
+        backend_done_event,
+        MCMCStrategy(verbose=True),
     )
 
     sensor_stream_process.start()

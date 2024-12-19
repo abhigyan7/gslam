@@ -1,32 +1,36 @@
 import logging
 from copy import deepcopy
 from dataclasses import dataclass
+from threading import Event
 from typing import List
 
 import torch
 import torch.multiprocessing as mp
+
+import rerun as rr
 import tqdm
+
+from skimage.metrics import structural_similarity as ssim
+from skimage.metrics import peak_signal_noise_ratio as psnr
 
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame
 from .rasterization import RasterizerConfig
-from .utils import get_projection_matrix, q_get, torch_to_pil, torch_image_to_np
-
-import rerun as rr
+from .utils import get_projection_matrix, q_get, torch_image_to_np
 
 
 def tracking_loss(
     gt_img: torch.Tensor,
     rendered_img: torch.Tensor,
 ):
-    return (rendered_img - gt_img).abs().sum()
+    return (rendered_img - gt_img).abs().mean()
 
 
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 150
+    num_tracking_iters: int = 120
 
     photometric_loss: str = 'l1'
 
@@ -41,7 +45,8 @@ class Frontend(mp.Process):
         backend_queue: mp.Queue,
         frontend_queue: mp.Queue,
         sensor_queue: mp.Queue,
-        rerun_recording_stream: rr.RecordingStream = None,
+        frontend_done_event: Event = None,
+        backend_done_event: Event = None,
     ):
         super().__init__()
         self.tracking_config: TrackingConfig = tracking_conf
@@ -55,13 +60,20 @@ class Frontend(mp.Process):
         self.requested_init = False
         self.initialized: bool = False
         self.logger = logging.getLogger(__name__)
-        self.logger.setLevel("DEBUG")
+        self.logger.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(
+            logging.Formatter(fmt='[%(levelname)s] %(name)s:%(lineno)s %(message)s')
+        )
+        self.logger.addHandler(handler)
 
         self.sensor_queue = sensor_queue
-        self.rr = rerun_recording_stream
+        self.frontend_done_event = frontend_done_event
+        self.backend_done_event = backend_done_event
 
     def track(self, new_frame: Frame):
-        self.logger.warning(f" Tracking frame, ts={new_frame.timestamp}")
+        self.logger.warning(f"Tracking frame, ts={new_frame.timestamp}")
         previous_keyframe = self.keyframes[-1]
 
         # start with unit Rt difference?
@@ -87,19 +99,47 @@ class Frontend(mp.Process):
 
             pbar.set_description(f"loss: {loss.item()}")
 
-        rr.log(
-            'frontend/tracking/rendered_img',
-            rr.Image(torch_image_to_np(rendered_rgb)).compress(95),
+        rendered_rgbd, rendered_alpha, render_info = self.splats(
+            new_frame.camera, new_frame.pose, render_depth=True
         )
 
         rr.log(
-            'frontend/tracking/gt_img',
+            'frontend/tracking/rendered_rgb',
+            rr.Image(torch_image_to_np(rendered_rgbd[..., :3])).compress(95),
+        )
+
+        rr.log(
+            'frontend/tracking/rendered_depth',
+            rr.Image(torch_image_to_np(rendered_rgbd[..., 3])).compress(95),
+        )
+
+        rr.log(
+            'frontend/tracking/gt_depth',
             rr.Image(torch_image_to_np(new_frame.img)).compress(95),
         )
 
-        self.logger.warning(f"{new_frame.img.shape=}, {rendered_rgb.shape=}")
+        rr.log(
+            'frontend/tracking/psnr',
+            rr.Scalar(
+                psnr(
+                    torch_image_to_np(rendered_rgb),
+                    torch_image_to_np(new_frame.img),
+                )
+            ),
+        )
 
-        torch_to_pil(rendered_rgb).save(f'tracking_{len(self.keyframes)}.png')
+        rr.log(
+            'frontend/tracking/ssim',
+            rr.Scalar(
+                ssim(
+                    torch_image_to_np(rendered_rgb),
+                    torch_image_to_np(new_frame.img),
+                    channel_axis=2,
+                )
+            ),
+        )
+
+        self.logger.warning(f"{new_frame.img.shape=}, {rendered_rgb.shape=}")
 
         return new_frame.pose()
 
@@ -117,13 +157,29 @@ class Frontend(mp.Process):
         self.splats, self.keyframes = splats, keyframes
         return
 
+    def dump_pointcloud(self):
+        rr.log(
+            'frontend/tracking/pc',
+            rr.Points3D(
+                positions=self.splats.means.detach().cpu().numpy(),
+                radii=self.splats.covar_scales.min(dim=-1)
+                .values.detach()
+                .cpu()
+                .numpy(),
+                colors=self.splats.colors.detach().cpu().numpy(),
+            ),
+        )
+
     @rr.shutdown_at_exit
     def run(self):
         rr.init('gslam', recording_id='gslam_1')
         rr.save('runs/rr.rrd')
+
         self.Ks = get_projection_matrix().to(self.tracking_config.device)
 
         self.logger.warning("test")
+
+        self.waiting_for_sync = False
 
         while True:
             match q_get(self.queue):
@@ -132,23 +188,36 @@ class Frontend(mp.Process):
                 case [BackendMessage.SYNC, map_data, keyframes]:
                     self.sync_maps(map_data, keyframes)
                     self.initialized = True
+                    self.waiting_for_sync = False
                 case None:
                     pass
                 case message_from_map:
                     self.logger.warning(f"Unknown {message_from_map=}")
 
-            if self.requested_init and not self.initialized:
+            if self.waiting_for_sync:
                 continue
 
-            frame: Frame = q_get(self.sensor_queue)
-            if frame is None:
+            if self.sensor_queue.empty():
                 continue
+            frame: Frame = self.sensor_queue.get()
+            if frame is None:
+                # data stream exhausted
+                self.map_queue.put(None)
+                break
 
             frame = frame.to(self.tracking_config.device)
             if not self.initialized:
                 self.request_initialization(frame)
-                self.requested_init = True
                 self.keyframes.append(frame)
+                self.waiting_for_sync = True
             else:
                 self.track(frame)
                 self.add_keyframe(frame)
+                self.waiting_for_sync = True
+
+        self.backend_done_event.wait()
+        self.logger.warning('Got backend done.')
+        self.logger.warning('emitted frontend done.')
+        self.frontend_done_event.set()
+
+        self.dump_pointcloud()

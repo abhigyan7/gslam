@@ -34,3 +34,4 @@ dependencies:
     - viser
     - pyquaternion
     - rerun-sdk=0.20.3
+    - torcheval
