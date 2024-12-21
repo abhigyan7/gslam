@@ -56,7 +56,7 @@ class Frontend(mp.Process):
         self.queue: mp.Queue[int] = frontend_queue
         self.keyframes: List[Frame] = []
 
-        self.splats = GaussianSplattingData.new_empty_model()
+        self.splats = GaussianSplattingData.empty()
 
         self.requested_init = False
         self.initialized: bool = False

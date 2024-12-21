@@ -1,9 +1,8 @@
 from torch import multiprocessing as mp
 
-from gslam.backend import Backend
+from gslam.backend import Backend, MapConfig
 from gslam.data import RGBSensorStream, TumRGB
 from gslam.frontend import Frontend, TrackingConfig
-from gslam.map import MapConfig
 from gslam.rasterization import RasterizerConfig
 from gsplat.strategy import DefaultStrategy
 

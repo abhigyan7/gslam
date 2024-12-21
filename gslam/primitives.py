@@ -5,6 +5,8 @@ from torch.nn import functional as F
 
 from .utils import unvmap
 
+from threading import Event
+
 identity_6d = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
 
 
@@ -189,3 +191,11 @@ class Frame:
         self.gt_pose = self.gt_pose.to(device)
         self.img = self.img.to(device)
         return self
+
+
+@dataclass
+class Events:
+    backend_done: Event
+    frontend_done: Event
+    sensor_stream_done: Event
+    initialized: Event

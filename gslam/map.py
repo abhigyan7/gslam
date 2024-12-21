@@ -1,43 +1,12 @@
-from dataclasses import dataclass, field
-from typing import Dict, Self, Tuple, Union
+from typing import Dict, Self, Tuple
 
 import torch
 from gsplat.rendering import rasterization
-from gsplat.strategy import DefaultStrategy, MCMCStrategy
 
 from .primitives import Camera, Pose
 from .utils import knn, create_batch
 
 from typing import List
-
-
-@dataclass
-class MapConfig:
-    densification_strategy: Union[DefaultStrategy, MCMCStrategy] = field(
-        default_factory=DefaultStrategy
-    )
-
-    opacity_regularization: float = 0.0
-    scale_regularization: float = 0.0
-
-    enable_pose_optimization: bool = False
-    pose_optimization_lr: float = 1e-5
-    pose_optimization_regularization = 1e-6
-    pose_noise: float = 0.0
-
-    # background rgb
-    background_color: Tuple[float, 3] = (0.0, 0.0, 0.0)
-
-    initialization_type: str = 'random'
-    initial_number_of_gaussians: int = 300_000
-    initial_extent: float = 3000.0
-    initial_opacity: float = 0.9
-    initial_scale: float = 1.0
-    scene_scale: float = 1.0
-
-    device: str = 'cuda:0'
-
-    optim_window_size: int = 5
 
 
 # consider the implications of all these structs being torch modules
@@ -84,7 +53,7 @@ class GaussianSplattingData(torch.nn.Module):
         return rendered_rgb, rendered_alpha, render_info
 
     @staticmethod
-    def new_empty_model(device: str = 'cuda'):
+    def empty(device: str = 'cuda'):
         return GaussianSplattingData(
             torch.tensor([], device=device),
             torch.tensor([], device=device),
@@ -92,6 +61,30 @@ class GaussianSplattingData(torch.nn.Module):
             torch.tensor([], device=device),
             torch.tensor([], device=device),
         )
+
+    @staticmethod
+    def initialize_map_random_cube(
+        n_gaussians,
+        initial_scale,
+        initial_opacity,
+    ):
+        points = torch.rand((n_gaussians, 3)) * 2.0 - 1.0
+        rgbs = torch.rand((n_gaussians, 3))
+
+        avg_distance_to_nearest_3_neighbors = torch.sqrt(
+            knn(points, 4)[:, 1:] ** 2
+        ).mean(dim=-1)
+        scales = (
+            torch.log(avg_distance_to_nearest_3_neighbors * initial_scale)
+            .unsqueeze(-1)
+            .repeat(1, 3)
+        )
+
+        N = points.shape[0]
+        quats = torch.rand((N, 4))
+        opacities = torch.logit(torch.full((N,), initial_opacity))
+
+        return GaussianSplattingData(points, quats, scales, opacities, rgbs)
 
     def clone(self) -> Self:
         return GaussianSplattingData(
@@ -110,79 +103,3 @@ class GaussianSplattingData(torch.nn.Module):
             'opacities': self.opacities,
             'colors': self.colors,
         }
-
-
-# consider the implications of all these structs being torch modules
-class GaussianSplattingMap:
-    def __init__(
-        self,
-        map_config: MapConfig,
-        data: GaussianSplattingData = None,
-    ):
-        self.data = data
-        self.map_conf = map_config
-        return
-
-    def initialize_map_random(self):
-        points = torch.rand((self.map_conf.initial_number_of_gaussians, 3)) * 2.0 - 1.0
-        points *= self.map_conf.initial_extent * self.map_conf.scene_scale
-        rgbs = torch.rand((self.map_conf.initial_number_of_gaussians, 3))
-
-        avg_distance_to_nearest_3_neighbors = torch.sqrt(
-            knn(points, 4)[:, 1:] ** 2
-        ).mean(dim=-1)
-        scales = (
-            torch.log(avg_distance_to_nearest_3_neighbors * self.map_conf.initial_scale)
-            .unsqueeze(-1)
-            .repeat(1, 3)
-        )
-
-        N = points.shape[0]
-        quats = torch.rand((N, 4))
-        opacities = torch.logit(torch.full((N,), self.map_conf.initial_opacity))
-
-        self.data = GaussianSplattingData(points, quats, scales, opacities, rgbs).to(
-            self.map_conf.device
-        )
-
-    def initialize_optimizers(self):
-        # TODO fix these LRs
-        self.optimizers: Dict[str, torch.optim.Optimizer] = {}
-        self.optimizers['means'] = torch.optim.Adam(
-            params=[
-                self.data.means,
-            ],
-            lr=0.001,
-        )
-        self.optimizers['quats'] = torch.optim.Adam(
-            params=[
-                self.data.quats,
-            ],
-            lr=0.001,
-        )
-        self.optimizers['scales'] = torch.optim.Adam(
-            params=[
-                self.data.scales,
-            ],
-            lr=0.001,
-        )
-        self.optimizers['opacities'] = torch.optim.Adam(
-            params=[
-                self.data.opacities,
-            ],
-            lr=0.001,
-        )
-        self.optimizers['colors'] = torch.optim.Adam(
-            params=[
-                self.data.colors,
-            ],
-            lr=0.001,
-        )
-
-    def zero_grad(self):
-        for optimizer in self.optimizers.values():
-            optimizer.zero_grad()
-
-    def step(self):
-        for optimizer in self.optimizers.values():
-            optimizer.step()
