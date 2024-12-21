@@ -22,20 +22,24 @@ class MapConfig:
         default_factory=DefaultStrategy
     )
 
-    opacity_regularization: float = 0.0
-    scale_regularization: float = 0.0
+    isotropic_regularization_weight: float = 10.0
 
-    enable_pose_optimization: bool = False
-    pose_optimization_lr: float = 1e-5
+    pose_optim_lr_translation: float = 0.001
+    pose_optim_lr_rotation: float = 0.003
     pose_optimization_regularization = 1e-6
-    pose_noise: float = 0.0
+
+    # 3dgs schedules means_lr, might need to look into this
+    means_lr: float = 0.00016
+    opacity_lr: float = 0.025
+    scale_lr: float = 0.005
+    color_lr: float = 0.005
+    quat_lr: float = 0.005
 
     # background rgb
     background_color: Tuple[float, 3] = (0.0, 0.0, 0.0)
 
     initialization_type: str = 'random'
-    initial_number_of_gaussians: int = 300_000
-    initial_extent: float = 3000.0
+    initial_number_of_gaussians: int = 30_000
     initial_opacity: float = 0.9
     initial_scale: float = 1.0
 
@@ -90,10 +94,13 @@ class Backend(torch.multiprocessing.Process):
                     render_info,
                 )
 
-            l1loss = (render_colors - gt_imgs).abs().mean()
-            opacity_loss = self.splats.opacities.abs().mean()
-            total_loss = l1loss + opacity_loss
-            total_loss.backward()
+            photometric_loss = (render_colors - gt_imgs).abs().mean()
+            mean_scales = self.splats.scales.mean(dim=0).detach()
+            isotropic_loss = (self.splats.scales - mean_scales).abs().mean()
+            total_loss = (
+                photometric_loss
+                + self.map_config.isotropic_regularization_weight * isotropic_loss
+            )
 
             desc = f"[Mapping] loss={total_loss.item():.3f}"
             pbar.set_description(desc)
@@ -132,23 +139,23 @@ class Backend(torch.multiprocessing.Process):
         self.splat_optimizers: Dict[str, torch.optim.Optimizer] = {}
         self.splat_optimizers['means'] = torch.optim.Adam(
             params=[self.splats.means],
-            lr=0.001,
+            lr=self.map_config.means_lr,
         )
         self.splat_optimizers['quats'] = torch.optim.Adam(
             params=[self.splats.quats],
-            lr=0.001,
+            lr=self.map_config.quat_lr,
         )
         self.splat_optimizers['scales'] = torch.optim.Adam(
             params=[self.splats.scales],
-            lr=0.001,
+            lr=self.map_config.scale_lr,
         )
         self.splat_optimizers['opacities'] = torch.optim.Adam(
             params=[self.splats.opacities],
-            lr=0.001,
+            lr=self.map_config.opacity_lr,
         )
         self.splat_optimizers['colors'] = torch.optim.Adam(
             params=[self.splats.colors],
-            lr=0.001,
+            lr=self.map_config.color_lr,
         )
         self.pose_optimizer = torch.optim.Adam(
             params=[torch.empty(0)],
@@ -176,10 +183,14 @@ class Backend(torch.multiprocessing.Process):
         self.logger.warning('Initialized')
         return
 
-    def add_keyframe(self, frame):
+    def add_keyframe(self, frame: Frame):
         self.keyframes.append(frame)
-        self.optimize_map()
-        self.queue.task_done()
+        self.pose_optimizer.add_param_group(
+            {'params': frame.pose.dt, 'lr': self.map_config.pose_optim_lr_translation}
+        )
+        self.pose_optimizer.add_param_group(
+            {'params': frame.pose.dR, 'lr': self.map_config.pose_optim_lr_rotation}
+        )
 
     def run(self):
         while True:
@@ -192,6 +203,7 @@ class Backend(torch.multiprocessing.Process):
                     self.sync_with_frontend()
                 case [FrontendMessage.ADD_KEYFRAME, frame]:
                     self.add_keyframe(frame)
+                    self.optimize_map()
                     self.sync_with_frontend()
                 case None:
                     break

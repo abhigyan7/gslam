@@ -44,9 +44,17 @@ class Pose(torch.nn.Module):
         if _pose is None:
             self.Rt = torch.nn.Buffer(torch.eye(4))
 
-        self.pose_delta = torch.nn.Parameter(
+        self.dt = torch.nn.Parameter(
             torch.tensor(
-                [0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0],
+                dtype=torch.float32,
+                requires_grad=is_learnable,
+            )
+        )
+
+        self.dR = torch.nn.Parameter(
+            torch.tensor(
+                [0, 0, 0, 0, 0, 0],
                 dtype=torch.float32,
                 requires_grad=is_learnable,
             )
@@ -58,12 +66,11 @@ class Pose(torch.nn.Module):
     def forward(self) -> torch.Tensor:
         if not self.is_learnable:
             return self.Rt
-        dx, drot = self.pose_delta[:3], self.pose_delta[3:]
         id = torch.tensor([1, 0, 0, 0, 1, 0], device=self.Rt.device)
-        rot = unvmap(rotation_6d_to_matrix)(drot + id)
+        rot = unvmap(rotation_6d_to_matrix)(self.dR + id)
         transform = torch.eye(4, device=self.Rt.device)
         transform[..., :3, :3] = rot
-        transform[..., :3, 3] = dx
+        transform[..., :3, 3] = self.dt
         return torch.matmul(self.Rt, transform)
 
     def to_qt(

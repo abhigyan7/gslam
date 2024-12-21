@@ -31,17 +31,16 @@ def tracking_loss(
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 2200
-
+    num_tracking_iters: int = 100
     photometric_loss: str = 'l1'
-
-    pose_lr: float = 0.003
+    pose_optim_lr_translation: float = 0.001
+    pose_optim_lr_rotation: float = 0.003
 
 
 class Frontend(mp.Process):
     def __init__(
         self,
-        tracking_conf: TrackingConfig,
+        conf: TrackingConfig,
         rasterizer_conf: RasterizerConfig,
         backend_queue: mp.Queue,
         frontend_queue: mp.Queue,
@@ -50,7 +49,7 @@ class Frontend(mp.Process):
         backend_done_event: Event = None,
     ):
         super().__init__()
-        self.tracking_config: TrackingConfig = tracking_conf
+        self.conf: TrackingConfig = conf
         self.rasterizer_conf: RasterizerConfig = rasterizer_conf
         self.map_queue: mp.Queue = backend_queue
         self.queue: mp.Queue[int] = frontend_queue
@@ -80,13 +79,19 @@ class Frontend(mp.Process):
         previous_keyframe = self.keyframes[-1]
 
         # start with unit Rt difference?
-        new_frame.pose = Pose(previous_keyframe.pose()).to(self.tracking_config.device)
+        new_frame.pose = Pose(previous_keyframe.pose()).to(self.conf.device)
 
         pose_optimizer = torch.optim.Adam(
-            new_frame.pose.parameters(), self.tracking_config.pose_lr
+            [
+                {'params': [new_frame.pose.dR], 'lr': self.conf.pose_optim_lr_rotation},
+                {
+                    'params': [new_frame.pose.dt],
+                    'lr': self.conf.pose_optim_lr_translation,
+                },
+            ]
         )
 
-        for i in (pbar := tqdm.trange(self.tracking_config.num_tracking_iters)):
+        for i in (pbar := tqdm.trange(self.conf.num_tracking_iters)):
             pose_optimizer.zero_grad()
             rendered_rgb, rendered_alpha, render_info = self.splats(
                 [new_frame.camera], [new_frame.pose]
@@ -206,7 +211,7 @@ class Frontend(mp.Process):
         rr.init('gslam', recording_id='gslam_1')
         rr.save('runs/rr.rrd')
 
-        self.Ks = get_projection_matrix().to(self.tracking_config.device)
+        self.Ks = get_projection_matrix().to(self.conf.device)
 
         self.logger.warning("test")
 
@@ -236,7 +241,7 @@ class Frontend(mp.Process):
                 self.map_queue.put(None)
                 break
 
-            frame = frame.to(self.tracking_config.device)
+            frame = frame.to(self.conf.device)
             if not self.initialized:
                 self.request_initialization(frame)
                 self.keyframes.append(frame)
