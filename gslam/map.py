@@ -6,7 +6,9 @@ from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 
 from .primitives import Camera, Pose
-from .utils import knn
+from .utils import knn, create_batch
+
+from typing import List
 
 
 @dataclass
@@ -35,42 +37,49 @@ class MapConfig:
 
     device: str = 'cuda:0'
 
+    optim_window_size: int = 5
+
 
 # consider the implications of all these structs being torch modules
 class GaussianSplattingData(torch.nn.Module):
     def __init__(
         self,
         means,  # gaussian centers
-        covar_quats,  # quaternions of covariance matrices
-        covar_scales,  # scales of covariance matrices
+        quats,  # quaternions of covariance matrices
+        scales,  # scales of covariance matrices
         opacities,  # alpha of gaussians
         colors,
     ):  # RGB values of gaussians
         super().__init__()
         self.means: torch.nn.Parameter = torch.nn.Parameter(means)
-        self.covar_quats: torch.nn.Parameter = torch.nn.Parameter(covar_quats)
-        self.covar_scales: torch.nn.Parameter = torch.nn.Parameter(covar_scales)
+        self.quats: torch.nn.Parameter = torch.nn.Parameter(quats)
+        self.scales: torch.nn.Parameter = torch.nn.Parameter(scales)
         self.opacities: torch.nn.Parameter = torch.nn.Parameter(opacities)
         self.colors: torch.nn.Parameter = torch.nn.Parameter(colors)
 
     def forward(
         self,
-        camera: Camera,
-        pose: Pose,
+        cameras: List[Camera],
+        poses: List[Pose],
         render_depth: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
         render_mode = 'RGB+D' if render_depth else 'RGB'
+
+        Ks = create_batch(cameras, lambda x: x.intrinsics)
+        viewmats = create_batch(poses, lambda x: x())
+
         rendered_rgb, rendered_alpha, render_info = rasterization(
             means=self.means,
-            quats=self.covar_quats,
-            scales=self.covar_scales,
+            quats=self.quats,
+            scales=self.scales,
             opacities=self.opacities,
             colors=self.colors,
-            viewmats=pose(),
-            Ks=camera.intrinsics,
-            width=camera.width,
-            height=camera.height,
+            viewmats=viewmats,
+            Ks=Ks,
+            width=cameras[0].width,
+            height=cameras[0].height,
             render_mode=render_mode,
+            packed=False,
         )
         return rendered_rgb, rendered_alpha, render_info
 
@@ -87,11 +96,20 @@ class GaussianSplattingData(torch.nn.Module):
     def clone(self) -> Self:
         return GaussianSplattingData(
             self.means.clone().detach(),
-            self.covar_quats.clone().detach(),
-            self.covar_scales.clone().detach(),
+            self.quats.clone().detach(),
+            self.scales.clone().detach(),
             self.opacities.clone().detach(),
             self.colors.clone().detach(),
         )
+
+    def as_dict(self):
+        return {
+            'means': self.means,
+            'quats': self.quats,
+            'scales': self.scales,
+            'opacities': self.opacities,
+            'colors': self.colors,
+        }
 
 
 # consider the implications of all these structs being torch modules
@@ -138,13 +156,13 @@ class GaussianSplattingMap:
         )
         self.optimizers['quats'] = torch.optim.Adam(
             params=[
-                self.data.covar_quats,
+                self.data.quats,
             ],
             lr=0.001,
         )
         self.optimizers['scales'] = torch.optim.Adam(
             params=[
-                self.data.covar_scales,
+                self.data.scales,
             ],
             lr=0.001,
         )
@@ -154,7 +172,7 @@ class GaussianSplattingMap:
             ],
             lr=0.001,
         )
-        self.optimizers['rgbs'] = torch.optim.Adam(
+        self.optimizers['colors'] = torch.optim.Adam(
             params=[
                 self.data.colors,
             ],

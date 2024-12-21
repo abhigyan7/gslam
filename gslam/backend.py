@@ -12,6 +12,7 @@ from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from .map import GaussianSplattingMap, MapConfig
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame
+from .utils import create_batch
 
 
 class Backend(torch.multiprocessing.Process):
@@ -35,40 +36,55 @@ class Backend(torch.multiprocessing.Process):
         self.strategy = strategy
 
     def optimize_map(self):
-        for step in (pbar := tqdm.tqdm(range(1200))):
-            self.map.zero_grad()
+        for step in (pbar := tqdm.tqdm(range(100))):
+            window_size = min(len(self.keyframes), self.map_config.optim_window_size)
+            window = random.sample(self.keyframes, window_size)
+            cameras = [x.camera for x in window]
+            poses = torch.nn.ModuleList([x.pose for x in window])
 
-            (random_keyframe,) = random.sample(self.keyframes, 1)
+            to_use_strategy = window_size == self.map_config.optim_window_size
 
-            render_colors, _render_alphas, _info = self.map.data(
-                random_keyframe.camera,
-                random_keyframe.pose,
-            )
+            gt_imgs = create_batch(window, lambda x: x.img)
 
-            self.strategy.step_pre_backward(
-                self.get_params_dict(),
-                self.get_optimizers_dict(),
-                self.strategy_state,
-                step,
-                _info,
-            )
+            pose_optimizer = torch.optim.SGD(poses.parameters())
+            for i in range(100):
+                self.map.zero_grad()
+                pose_optimizer.zero_grad()
 
-            l1loss = (render_colors - self.keyframes[0].img).abs().mean()
-            l1loss.backward()
+                render_colors, _render_alphas, render_info = self.map.data(
+                    cameras,
+                    poses,
+                )
 
-            desc = f"loss={l1loss.item():.3f}"
-            pbar.set_description(desc)
+                if to_use_strategy:
+                    self.strategy.step_pre_backward(
+                        self.map.data.as_dict(),
+                        self.map.optimizers,
+                        self.strategy_state,
+                        step,
+                        render_info,
+                    )
 
-            self.strategy.step_post_backward(
-                self.get_params_dict(),
-                self.get_optimizers_dict(),
-                self.strategy_state,
-                step,
-                _info,
-                lr=0.0003,
-            )
+                l1loss = (render_colors - gt_imgs).abs().mean()
+                opacity_loss = self.map.data.opacities.abs().mean()
+                total_loss = l1loss + opacity_loss
+                total_loss.backward()
 
-            self.map.step()
+                desc = f"loss={total_loss.item():.3f}"
+                pbar.set_description(desc)
+
+                self.map.step()
+                pose_optimizer.step()
+
+                if to_use_strategy:
+                    self.strategy.step_post_backward(
+                        self.map.data.as_dict(),
+                        self.map.optimizers,
+                        self.strategy_state,
+                        step,
+                        render_info,
+                        # lr=0.03,
+                    )
 
         return
 
@@ -78,29 +94,16 @@ class Backend(torch.multiprocessing.Process):
         )
         return
 
-    def get_params_dict(
-        self,
-    ):
-        return {
-            'means': self.map.data.means,
-            'scales': self.map.data.covar_scales,
-            'quats': self.map.data.covar_quats,
-            'rgbs': self.map.data.colors,
-            'opacities': self.map.data.opacities,
-        }
-
-    def get_optimizers_dict(self):
-        return self.map.optimizers
-
     def initialize_densification(self):
-        params = self.get_params_dict()
-        optimizers = self.get_optimizers_dict()
+        params = self.map.data.as_dict()
+        optimizers = self.map.optimizers
         self.strategy.check_sanity(params, optimizers)
         self.strategy_state = self.strategy.initialize_state()
         return
 
     def initialize(self, frame):
         self.logger.warning('Initializing')
+        frame = frame.to(self.map_config.device)
         self.keyframes = [frame]
         self.map.initialize_map_random()
         self.map.initialize_optimizers()
@@ -111,11 +114,9 @@ class Backend(torch.multiprocessing.Process):
         return
 
     def add_keyframe(self, frame):
-        self.logger.warning('got add keyframe')
         self.keyframes.append(frame)
         self.optimize_map()
         self.queue.task_done()
-        self.logger.warning('done adding keyframe')
 
     # @rr.shutdown_at_exit
     def run(self):

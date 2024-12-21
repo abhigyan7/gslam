@@ -5,6 +5,14 @@ import torch
 from PIL import Image
 from sklearn.neighbors import NearestNeighbors
 
+import functools
+from typing import Callable
+
+
+def create_batch(things, getter):
+    things = [getter(thing) for thing in things]
+    return torch.stack(things, dim=0)
+
 
 def knn(x: torch.Tensor, K: int = 4) -> torch.Tensor:
     x_np = x.cpu().numpy()
@@ -66,3 +74,13 @@ def kabsch_umeyama(A, B):
     t = EA - c * R @ EB
 
     return R, c, t
+
+
+def unvmap(func: Callable[[torch.Tensor], torch.Tensor]):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        args = [arg.unsqueeze(0) for arg in args]
+        ret = func(*args, **kwargs)
+        return ret.squeeze(0)
+
+    return wrapper

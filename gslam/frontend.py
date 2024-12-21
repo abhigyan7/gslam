@@ -3,6 +3,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from threading import Event
 from typing import List
+import os
 
 import torch
 import torch.multiprocessing as mp
@@ -15,9 +16,9 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
-from .primitives import Frame
+from .primitives import Frame, Pose
 from .rasterization import RasterizerConfig
-from .utils import get_projection_matrix, q_get, torch_image_to_np
+from .utils import get_projection_matrix, q_get, torch_image_to_np, torch_to_pil
 
 
 def tracking_loss(
@@ -30,7 +31,7 @@ def tracking_loss(
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 120
+    num_tracking_iters: int = 2200
 
     photometric_loss: str = 'l1'
 
@@ -71,13 +72,15 @@ class Frontend(mp.Process):
         self.sensor_queue = sensor_queue
         self.frontend_done_event = frontend_done_event
         self.backend_done_event = backend_done_event
+        os.makedirs('runs/final', exist_ok=True)
+        os.makedirs('runs/gt', exist_ok=True)
+        os.makedirs('runs/renders', exist_ok=True)
 
     def track(self, new_frame: Frame):
-        self.logger.warning(f"Tracking frame, ts={new_frame.timestamp}")
         previous_keyframe = self.keyframes[-1]
 
         # start with unit Rt difference?
-        new_frame.pose = deepcopy(previous_keyframe.pose).cuda()
+        new_frame.pose = Pose(previous_keyframe.pose()).to(self.tracking_config.device)
 
         pose_optimizer = torch.optim.Adam(
             new_frame.pose.parameters(), self.tracking_config.pose_lr
@@ -86,7 +89,7 @@ class Frontend(mp.Process):
         for i in (pbar := tqdm.trange(self.tracking_config.num_tracking_iters)):
             pose_optimizer.zero_grad()
             rendered_rgb, rendered_alpha, render_info = self.splats(
-                new_frame.camera, new_frame.pose
+                [new_frame.camera], [new_frame.pose]
             )
             loss = tracking_loss(rendered_rgb, new_frame.img)
             loss.backward()
@@ -97,10 +100,12 @@ class Frontend(mp.Process):
                 rr.Scalar(loss.item()),
             )
 
-            pbar.set_description(f"loss: {loss.item()}")
+            pbar.set_description(
+                f"Tracking frame {len(self.keyframes)}, loss: {loss.item():.3f}"
+            )
 
         rendered_rgbd, rendered_alpha, render_info = self.splats(
-            new_frame.camera, new_frame.pose, render_depth=True
+            [new_frame.camera], [new_frame.pose], render_depth=True
         )
 
         rr.log(
@@ -114,7 +119,7 @@ class Frontend(mp.Process):
         )
 
         rr.log(
-            'frontend/tracking/gt_depth',
+            'frontend/tracking/gt_rgb',
             rr.Image(torch_image_to_np(new_frame.img)).compress(95),
         )
 
@@ -139,7 +144,8 @@ class Frontend(mp.Process):
             ),
         )
 
-        self.logger.warning(f"{new_frame.img.shape=}, {rendered_rgb.shape=}")
+        torch_to_pil(rendered_rgb).save(f'runs/renders/{len(self.keyframes):08}.png')
+        torch_to_pil(new_frame.img).save(f'runs/gt/{len(self.keyframes):08}.png')
 
         return new_frame.pose()
 
@@ -162,13 +168,38 @@ class Frontend(mp.Process):
             'frontend/tracking/pc',
             rr.Points3D(
                 positions=self.splats.means.detach().cpu().numpy(),
-                radii=self.splats.covar_scales.min(dim=-1)
-                .values.detach()
-                .cpu()
-                .numpy(),
+                radii=self.splats.scales.min(dim=-1).values.detach().cpu().numpy(),
                 colors=self.splats.colors.detach().cpu().numpy(),
             ),
         )
+
+    def dump_video(self):
+        for i, kf in enumerate(self.keyframes):
+            rendered_rgb, rendered_alpha, render_info = self.splats(
+                [kf.camera],
+                [kf.pose],
+            )
+            torch_to_pil(rendered_rgb).save(f'runs/final/{i:08}.png')
+        os.system(
+            'ffmpeg -y -framerate 30 -pattern_type glob -i "runs/final/*.png" -c:v libx264 -pix_fmt yuv420p runs/final.mp4'
+        )
+        os.system(
+            'ffmpeg -y -framerate 30 -pattern_type glob -i "runs/gt/*.png" -c:v libx264 -pix_fmt yuv420p runs/gt.mp4'
+        )
+        os.system(
+            'ffmpeg -y -framerate 30 -pattern_type glob -i "runs/renders/*.png" -c:v libx264 -pix_fmt yuv420p runs/renders.mp4'
+        )
+        # os.system(f'rm runs/*/*.png')
+
+    def dump_trajectory(self):
+        for i, kf in enumerate(self.keyframes):
+            q, t = kf.pose.to_qt()
+            q = q.detach().cpu().numpy().reshape(-1)
+            t = t.detach().cpu().numpy().reshape(-1)
+            rr.log(
+                'frontend/tracking/pose',
+                rr.Transform3D(rotation=rr.datatypes.Quaternion(xyzw=q), translation=t),
+            )
 
     @rr.shutdown_at_exit
     def run(self):
@@ -218,6 +249,9 @@ class Frontend(mp.Process):
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')
         self.logger.warning('emitted frontend done.')
-        self.frontend_done_event.set()
 
+        self.dump_trajectory()
         self.dump_pointcloud()
+        self.dump_video()
+
+        self.frontend_done_event.set()

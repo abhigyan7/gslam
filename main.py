@@ -5,7 +5,7 @@ from gslam.data import RGBSensorStream, TumRGB
 from gslam.frontend import Frontend, TrackingConfig
 from gslam.map import MapConfig
 from gslam.rasterization import RasterizerConfig
-from gsplat.strategy import MCMCStrategy
+from gsplat.strategy import DefaultStrategy
 
 import sys
 import gc
@@ -45,7 +45,7 @@ def main(seq_len: int = -1):
         frontend_to_backend_queue,
         backend_to_frontend_queue,
         backend_done_event,
-        MCMCStrategy(verbose=True),
+        DefaultStrategy(verbose=True),
     )
 
     sensor_stream_process.start()
