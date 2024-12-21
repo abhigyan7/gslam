@@ -47,6 +47,8 @@ class MapConfig:
 
     optim_window_size: int = 5
 
+    num_iters_mapping: int = 150
+
 
 class Backend(torch.multiprocessing.Process):
     def __init__(
@@ -71,9 +73,8 @@ class Backend(torch.multiprocessing.Process):
     def optimize_map(self):
         window_size = min(len(self.keyframes), self.map_config.optim_window_size)
         to_use_strategy = window_size == self.map_config.optim_window_size
-        to_use_strategy = False
 
-        for step in (pbar := tqdm.trange(100)):
+        for step in (pbar := tqdm.trange(self.map_config.num_iters_mapping)):
             window = random.sample(self.keyframes, window_size)
             cameras = [x.camera for x in window]
             poses = torch.nn.ModuleList([x.pose for x in window])
@@ -101,6 +102,8 @@ class Backend(torch.multiprocessing.Process):
                 photometric_loss
                 + self.map_config.isotropic_regularization_weight * isotropic_loss
             )
+
+            total_loss.backward()
 
             desc = f"[Mapping] loss={total_loss.item():.3f}"
             pbar.set_description(desc)
