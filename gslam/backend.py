@@ -39,9 +39,10 @@ class MapConfig:
     background_color: Tuple[float, 3] = (0.0, 0.0, 0.0)
 
     initialization_type: str = 'random'
-    initial_number_of_gaussians: int = 30_000
+    initial_number_of_gaussians: int = 10_000
     initial_opacity: float = 0.9
     initial_scale: float = 1.0
+    initial_extent: float = 1.0
 
     device: str = 'cuda:0'
 
@@ -76,6 +77,7 @@ class Backend(torch.multiprocessing.Process):
 
         for step in (pbar := tqdm.trange(self.map_config.num_iters_mapping)):
             window = random.sample(self.keyframes, window_size)
+            window = self.keyframes[:1]
             cameras = [x.camera for x in window]
             poses = torch.nn.ModuleList([x.pose for x in window])
             gt_imgs = create_batch(window, lambda x: x.img)
@@ -96,7 +98,7 @@ class Backend(torch.multiprocessing.Process):
                 )
 
             photometric_loss = (render_colors - gt_imgs).abs().mean()
-            mean_scales = self.splats.scales.mean(dim=0).detach()
+            mean_scales = self.splats.scales.mean(dim=1, keepdim=True).detach()
             isotropic_loss = (self.splats.scales - mean_scales).abs().mean()
             total_loss = (
                 photometric_loss
@@ -119,6 +121,7 @@ class Backend(torch.multiprocessing.Process):
                     render_info,
                     # lr=0.03,
                 )
+
         return
 
     def sync_with_frontend(self):
@@ -170,7 +173,7 @@ class Backend(torch.multiprocessing.Process):
         self.strategy_state = self.strategy.initialize_state()
         return
 
-    def initialize(self, frame):
+    def initialize(self, frame: Frame):
         self.logger.warning('Initializing')
         frame = frame.to(self.map_config.device)
         self.keyframes = [frame]
@@ -178,7 +181,18 @@ class Backend(torch.multiprocessing.Process):
             self.map_config.initial_number_of_gaussians,
             self.map_config.initial_scale,
             self.map_config.initial_opacity,
+            self.map_config.initial_extent,
         ).to(self.map_config.device)
+
+        self.splats = GaussianSplattingData.initialize_in_camera_frustum(
+            self.map_config.initial_number_of_gaussians,
+            frame.camera.intrinsics[0, 0].item(),
+            frame.camera.intrinsics[0, 0].item(),
+            frame.camera.intrinsics[0, 0].item() * 4.0,
+            frame.img.shape[0],
+            frame.img.shape[1],
+        ).to(self.map_config.device)
+
         self.initialize_optimizers()
         self.initialize_densification()
         self.optimize_map()

@@ -58,8 +58,8 @@ class TumRGB:
         filename = self.sequence_dir / self.rgb_frame_filenames[idx]
         image = np.asarray(Image.open(filename))
         image = np.float32(image) / 255.0
-        image = torch.Tensor(image).cuda().unsqueeze(0)
-        _, height, width, _channels = image.shape
+        image = torch.Tensor(image).cuda()
+        height, width, _channels = image.shape
         gt_pose = torch.Tensor(self.poses[idx, ...])
         ts = self.rgb_frame_timestamps[idx]
         Ks = torch.FloatTensor(

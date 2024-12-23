@@ -21,6 +21,9 @@ from .rasterization import RasterizerConfig
 from .utils import get_projection_matrix, q_get, torch_image_to_np, torch_to_pil
 
 
+import numpy as np
+
+
 def tracking_loss(
     gt_img: torch.Tensor,
     rendered_img: torch.Tensor,
@@ -96,6 +99,7 @@ class Frontend(mp.Process):
             rendered_rgb, rendered_alpha, render_info = self.splats(
                 [new_frame.camera], [new_frame.pose]
             )
+            rendered_rgb = rendered_rgb[0]
             loss = tracking_loss(rendered_rgb, new_frame.img)
             loss.backward()
             pose_optimizer.step()
@@ -108,6 +112,13 @@ class Frontend(mp.Process):
             pbar.set_description(
                 f"Tracking frame {len(self.keyframes)}, loss: {loss.item():.3f}"
             )
+
+        self.last_radii = render_info['radii'].detach().cpu().numpy()
+
+        print(f'{self.last_radii.shape=}')
+        print(f'{self.last_radii.mean()=}')
+        print(f'{self.last_radii.min()=}')
+        print(f'{self.last_radii.max()=}')
 
         rendered_rgbd, rendered_alpha, render_info = self.splats(
             [new_frame.camera], [new_frame.pose], render_depth=True
@@ -137,6 +148,9 @@ class Frontend(mp.Process):
                 )
             ),
         )
+
+        print(f'{rendered_rgb.shape=}')
+        print(f'{new_frame.img.shape=}')
 
         rr.log(
             'frontend/tracking/ssim',
@@ -175,7 +189,9 @@ class Frontend(mp.Process):
                 positions=self.splats.means.detach().cpu().numpy(),
                 radii=self.splats.scales.min(dim=-1).values.detach().cpu().numpy(),
                 colors=self.splats.colors.detach().cpu().numpy(),
+                class_ids=self.last_radii,
             ),
+            static=True,
         )
 
     def dump_video(self):
@@ -184,7 +200,7 @@ class Frontend(mp.Process):
                 [kf.camera],
                 [kf.pose],
             )
-            torch_to_pil(rendered_rgb).save(f'runs/final/{i:08}.png')
+            torch_to_pil(rendered_rgb[0]).save(f'runs/final/{i:08}.png')
         os.system(
             'ffmpeg -y -framerate 30 -pattern_type glob -i "runs/final/*.png" -c:v libx264 -pix_fmt yuv420p runs/final.mp4'
         )
@@ -199,11 +215,13 @@ class Frontend(mp.Process):
     def dump_trajectory(self):
         for i, kf in enumerate(self.keyframes):
             q, t = kf.pose.to_qt()
-            q = q.detach().cpu().numpy().reshape(-1)
+            q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
             t = t.detach().cpu().numpy().reshape(-1)
+            print(f'{i=}, {q=}, {t=}')
             rr.log(
-                'frontend/tracking/pose',
+                f'frontend/tracking/pose_{i}',
                 rr.Transform3D(rotation=rr.datatypes.Quaternion(xyzw=q), translation=t),
+                static=True,
             )
 
     @rr.shutdown_at_exit

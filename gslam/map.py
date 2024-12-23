@@ -63,12 +63,50 @@ class GaussianSplattingData(torch.nn.Module):
         )
 
     @staticmethod
+    def initialize_in_camera_frustum(
+        n_gaussians: int,
+        f: float,
+        near: float,
+        far: float,
+        height: float,
+        width: float,
+        initial_scale: float = 0.1,
+        initial_opacity: float = 0.9,
+    ):
+        zs = torch.rand((n_gaussians,)) * (far - near) + near
+        us = (torch.rand((n_gaussians,)) - 0.5) * width
+        vs = (torch.rand((n_gaussians,)) - 0.5) * height
+        xs = us * zs / f
+        ys = vs * zs / f
+
+        points = torch.stack([xs, ys, zs], dim=1)
+
+        rgbs = torch.rand((n_gaussians, 3))
+
+        avg_distance_to_nearest_3_neighbors = torch.sqrt(
+            knn(points, 4)[:, 1:] ** 2
+        ).mean(dim=-1)
+        scales = (
+            torch.log(avg_distance_to_nearest_3_neighbors * initial_scale)
+            .unsqueeze(-1)
+            .repeat(1, 3)
+        )
+
+        quats = torch.rand((n_gaussians, 4))
+        opacities = torch.logit(torch.full((n_gaussians,), initial_opacity))
+
+        return GaussianSplattingData(points, quats, scales, opacities, rgbs)
+
+    @staticmethod
     def initialize_map_random_cube(
         n_gaussians,
         initial_scale,
         initial_opacity,
+        initial_extent,
     ):
-        points = torch.rand((n_gaussians, 3)) * 2.0 - 1.0
+        points = torch.rand((n_gaussians, 3))
+        points *= initial_extent
+        points[..., 2] = 20000.0
         rgbs = torch.rand((n_gaussians, 3))
 
         avg_distance_to_nearest_3_neighbors = torch.sqrt(

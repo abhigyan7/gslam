@@ -22,7 +22,7 @@ def knn(x: torch.Tensor, K: int = 4) -> torch.Tensor:
 
 
 def torch_image_to_np(torch_img: torch.Tensor) -> np.ndarray:
-    img = torch_img[0, ...].detach().cpu().numpy()
+    img = torch_img.detach().cpu().numpy()
     img = np.uint8(img.clip(0.0, 1.0) * 255.0)
     return img
 
