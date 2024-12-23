@@ -40,8 +40,8 @@ class GaussianSplattingData(torch.nn.Module):
         rendered_rgb, rendered_alpha, render_info = rasterization(
             means=self.means,
             quats=self.quats,
-            scales=self.scales,
-            opacities=self.opacities,
+            scales=torch.exp(self.scales),
+            opacities=torch.sigmoid(self.opacities),
             colors=self.colors,
             viewmats=viewmats,
             Ks=Ks,

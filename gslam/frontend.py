@@ -115,11 +115,6 @@ class Frontend(mp.Process):
 
         self.last_radii = render_info['radii'].detach().cpu().numpy()
 
-        print(f'{self.last_radii.shape=}')
-        print(f'{self.last_radii.mean()=}')
-        print(f'{self.last_radii.min()=}')
-        print(f'{self.last_radii.max()=}')
-
         rendered_rgbd, rendered_alpha, render_info = self.splats(
             [new_frame.camera], [new_frame.pose], render_depth=True
         )
@@ -148,9 +143,6 @@ class Frontend(mp.Process):
                 )
             ),
         )
-
-        print(f'{rendered_rgb.shape=}')
-        print(f'{new_frame.img.shape=}')
 
         rr.log(
             'frontend/tracking/ssim',
@@ -202,13 +194,13 @@ class Frontend(mp.Process):
             )
             torch_to_pil(rendered_rgb[0]).save(f'runs/final/{i:08}.png')
         os.system(
-            'ffmpeg -y -framerate 30 -pattern_type glob -i "runs/final/*.png" -c:v libx264 -pix_fmt yuv420p runs/final.mp4'
+            'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "runs/final/*.png" -c:v libx264 -pix_fmt yuv420p runs/final.mp4'
         )
         os.system(
-            'ffmpeg -y -framerate 30 -pattern_type glob -i "runs/gt/*.png" -c:v libx264 -pix_fmt yuv420p runs/gt.mp4'
+            'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "runs/gt/*.png" -c:v libx264 -pix_fmt yuv420p runs/gt.mp4'
         )
         os.system(
-            'ffmpeg -y -framerate 30 -pattern_type glob -i "runs/renders/*.png" -c:v libx264 -pix_fmt yuv420p runs/renders.mp4'
+            'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "runs/renders/*.png" -c:v libx264 -pix_fmt yuv420p runs/renders.mp4'
         )
         # os.system(f'rm runs/*/*.png')
 
@@ -217,7 +209,6 @@ class Frontend(mp.Process):
             q, t = kf.pose.to_qt()
             q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
             t = t.detach().cpu().numpy().reshape(-1)
-            print(f'{i=}, {q=}, {t=}')
             rr.log(
                 f'frontend/tracking/pose_{i}',
                 rr.Transform3D(rotation=rr.datatypes.Quaternion(xyzw=q), translation=t),
@@ -271,10 +262,11 @@ class Frontend(mp.Process):
 
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')
-        self.logger.warning('emitted frontend done.')
 
         self.dump_trajectory()
         self.dump_pointcloud()
         self.dump_video()
+        print('Done dumping everything')
+        self.logger.warning('emitted frontend done.')
 
         self.frontend_done_event.set()

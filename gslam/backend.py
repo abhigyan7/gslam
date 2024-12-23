@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import logging
 import random
 import threading
@@ -8,20 +8,15 @@ from typing import List, Dict, Tuple
 import torch
 import tqdm
 
-from gsplat.strategy import DefaultStrategy, MCMCStrategy
-
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame
+from .pruning import PruneLowOpacity
 from .utils import create_batch
 
 
 @dataclass
 class MapConfig:
-    densification_strategy: DefaultStrategy | MCMCStrategy = field(
-        default_factory=DefaultStrategy
-    )
-
     isotropic_regularization_weight: float = 10.0
 
     pose_optim_lr_translation: float = 0.001
@@ -50,6 +45,8 @@ class MapConfig:
 
     num_iters_mapping: int = 150
 
+    opacity_pruning_threshold: float = 0.8
+
 
 class Backend(torch.multiprocessing.Process):
     def __init__(
@@ -58,7 +55,6 @@ class Backend(torch.multiprocessing.Process):
         queue: torch.multiprocessing.Queue,
         frontend_queue: torch.multiprocessing.Queue,
         backend_done_event: threading.Event,
-        strategy: DefaultStrategy | MCMCStrategy,
     ):
         super().__init__()
         self.map_config = map_config
@@ -68,16 +64,14 @@ class Backend(torch.multiprocessing.Process):
         self.logger.setLevel("DEBUG")
         self.keyframes: List[Frame] = []
         self.backend_done_event = backend_done_event
-        self.strategy = strategy
         self.splats = GaussianSplattingData.empty()
+        self.pruning = PruneLowOpacity(self.map_config.opacity_pruning_threshold)
 
     def optimize_map(self):
         window_size = min(len(self.keyframes), self.map_config.optim_window_size)
-        to_use_strategy = window_size == self.map_config.optim_window_size
 
-        for step in (pbar := tqdm.trange(self.map_config.num_iters_mapping)):
+        for _ in (pbar := tqdm.trange(self.map_config.num_iters_mapping)):
             window = random.sample(self.keyframes, window_size)
-            window = self.keyframes[:1]
             cameras = [x.camera for x in window]
             poses = torch.nn.ModuleList([x.pose for x in window])
             gt_imgs = create_batch(window, lambda x: x.img)
@@ -87,15 +81,6 @@ class Backend(torch.multiprocessing.Process):
                 cameras,
                 poses,
             )
-
-            if to_use_strategy:
-                self.strategy.step_pre_backward(
-                    self.splats.as_dict(),
-                    self.splat_optimizers,
-                    self.strategy_state,
-                    step,
-                    render_info,
-                )
 
             photometric_loss = (render_colors - gt_imgs).abs().mean()
             mean_scales = self.splats.scales.mean(dim=1, keepdim=True).detach()
@@ -107,20 +92,12 @@ class Backend(torch.multiprocessing.Process):
 
             total_loss.backward()
 
-            desc = f"[Mapping] loss={total_loss.item():.3f}"
+            desc = f"[Mapping] loss={total_loss.item():.3f}, n_splats={self.splats.means.shape[0]:07} opacmin={torch.sigmoid(self.splats.opacities).min():.2f}"
             pbar.set_description(desc)
 
             self.step_all_optimizers()
 
-            if to_use_strategy:
-                self.strategy.step_post_backward(
-                    self.splats.as_dict(),
-                    self.splat_optimizers,
-                    self.strategy_state,
-                    step,
-                    render_info,
-                    # lr=0.03,
-                )
+            # self.pruning.step(self.splats, self.splat_optimizers)
 
         return
 
@@ -168,11 +145,6 @@ class Backend(torch.multiprocessing.Process):
             lr=0.001,
         )
 
-    def initialize_densification(self):
-        self.strategy.check_sanity(self.splats.as_dict(), self.splat_optimizers)
-        self.strategy_state = self.strategy.initialize_state()
-        return
-
     def initialize(self, frame: Frame):
         self.logger.warning('Initializing')
         frame = frame.to(self.map_config.device)
@@ -194,7 +166,6 @@ class Backend(torch.multiprocessing.Process):
         ).to(self.map_config.device)
 
         self.initialize_optimizers()
-        self.initialize_densification()
         self.optimize_map()
         self.queue.task_done()
         self.logger.warning('Initialized')
