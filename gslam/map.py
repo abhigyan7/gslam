@@ -11,6 +11,8 @@ from typing import List
 
 # consider the implications of all these structs being torch modules
 class GaussianSplattingData(torch.nn.Module):
+    _per_splat_params = ['means', 'quats', 'scales', 'opacities', 'colors']
+
     def __init__(
         self,
         means,  # gaussian centers
@@ -134,10 +136,12 @@ class GaussianSplattingData(torch.nn.Module):
         )
 
     def as_dict(self):
-        return {
-            'means': self.means,
-            'quats': self.quats,
-            'scales': self.scales,
-            'opacities': self.opacities,
-            'colors': self.colors,
-        }
+        return torch.nn.ParameterDict(
+            {
+                'means': self.means,
+                'quats': self.quats,
+                'scales': self.scales,
+                'opacities': self.opacities,
+                'colors': self.colors,
+            }
+        )

@@ -45,7 +45,7 @@ class MapConfig:
 
     num_iters_mapping: int = 150
 
-    opacity_pruning_threshold: float = 0.8
+    opacity_pruning_threshold: float = 0.6
 
 
 class Backend(torch.multiprocessing.Process):
@@ -97,7 +97,7 @@ class Backend(torch.multiprocessing.Process):
 
             self.step_all_optimizers()
 
-            # self.pruning.step(self.splats, self.splat_optimizers)
+            self.pruning.step(self.splats, self.splat_optimizers)
 
         return
 
