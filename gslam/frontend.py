@@ -96,7 +96,7 @@ class Frontend(mp.Process):
 
         for i in (pbar := tqdm.trange(self.conf.num_tracking_iters)):
             pose_optimizer.zero_grad()
-            rendered_rgb, rendered_alpha, render_info = self.splats(
+            rendered_rgb, _rendered_alpha, render_info = self.splats(
                 [new_frame.camera], [new_frame.pose]
             )
             rendered_rgb = rendered_rgb[0]
@@ -115,7 +115,7 @@ class Frontend(mp.Process):
 
         self.last_radii = render_info['radii'].detach().cpu().numpy()
 
-        rendered_rgbd, rendered_alpha, render_info = self.splats(
+        rendered_rgbd, _rendered_alpha, _render_info = self.splats(
             [new_frame.camera], [new_frame.pose], render_depth=True
         )
 
@@ -188,7 +188,7 @@ class Frontend(mp.Process):
 
     def dump_video(self):
         for i, kf in enumerate(self.keyframes):
-            rendered_rgb, rendered_alpha, render_info = self.splats(
+            rendered_rgb, _rendered_alpha, _render_info = self.splats(
                 [kf.camera],
                 [kf.pose],
             )

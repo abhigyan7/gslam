@@ -1,2 +1,7 @@
 [tool.ruff.format]
 quote-style = "preserve"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "W1", "W2", "W391"]
+preview = true
+explicit-preview-rules = true

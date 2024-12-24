@@ -83,7 +83,7 @@ def initialize_map(
 
 def main():
     tum_dataset = TumRGB('../datasets/tum/rgbd_dataset_freiburg1_desk')
-    gt_img, camtoworld, timestamps = tum_dataset[0]
+    gt_img, camtoworld, _timestamps = tum_dataset[0]
     gt_img = torch.FloatTensor(gt_img).cuda().unsqueeze(0)
     camtoworld = torch.eye(4)
     _, height, width, _ = gt_img.shape
@@ -103,7 +103,7 @@ def main():
     splats, optimizers = initialize_map(MapConfig())
     print("Model initialized. Number of GS:", len(splats["means"]))
 
-    render_colors, render_alphas, info = rasterization(
+    render_colors, render_alphas, _info = rasterization(
         means=splats['means'],
         quats=splats['quats'],
         scales=splats['scales'],
@@ -119,7 +119,7 @@ def main():
         for _, optimizer in optimizers.items():
             optimizer.zero_grad()
 
-        render_colors, render_alphas, info = rasterization(
+        render_colors, render_alphas, _info = rasterization(
             means=splats['means'],
             quats=splats['quats'],
             scales=splats['scales'],

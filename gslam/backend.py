@@ -77,7 +77,7 @@ class Backend(torch.multiprocessing.Process):
             gt_imgs = create_batch(window, lambda x: x.img)
             self.zero_grad_all_optimizers()
 
-            render_colors, _render_alphas, render_info = self.splats(
+            render_colors, _render_alphas, _render_info = self.splats(
                 cameras,
                 poses,
             )
