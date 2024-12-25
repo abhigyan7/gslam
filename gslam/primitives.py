@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch.nn import functional as F
@@ -183,6 +183,15 @@ class Camera:
         self.intrinsics = self.intrinsics.to(device)
         return self
 
+    def clone(
+        self,
+    ):
+        return Camera(
+            self.intrinsics.detach(),
+            self.height,
+            self.width,
+        )
+
     @torch.no_grad()
     def backproject(self, depth_map: torch.Tensor) -> torch.Tensor:
         fx = self.intrinsics[0, 0].item()
@@ -219,13 +228,20 @@ class Frame:
     camera: Camera
     pose: Pose
     gt_pose: torch.Tensor
+    visible_gaussians: torch.Tensor = field(default=None)
 
     def to(self, device):
-        self.camera = self.camera.to(device)
-        self.pose = self.pose.to(device)
-        self.gt_pose = self.gt_pose.to(device)
-        self.img = self.img.to(device)
-        return self
+        ret = Frame(
+            timestamp=self.timestamp,
+            camera=self.camera.to(device),
+            pose=self.pose.to(device),
+            gt_pose=self.gt_pose.to(device),
+            img=self.img.to(device),
+            visible_gaussians=self.visible_gaussians.to(device)
+            if self.visible_gaussians is not None
+            else None,
+        )
+        return ret
 
 
 @dataclass

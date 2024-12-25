@@ -42,7 +42,8 @@ class MapConfig:
 
     device: str = 'cuda:0'
 
-    optim_window_size: int = 5
+    optim_window_last_n_keyframes: int = 5
+    optim_window_random_keyframes: int = 5
 
     num_iters_mapping: int = 150
 
@@ -71,17 +72,39 @@ class Backend(torch.multiprocessing.Process):
             0.2, 0.5, 0.1, self.map_config.initial_opacity
         )
 
-    def optimize_map(self):
-        window_size = min(len(self.keyframes), self.map_config.optim_window_size)
+    def optimization_window(self):
+        window_size_total = (
+            self.map_config.optim_window_last_n_keyframes
+            + self.map_config.optim_window_random_keyframes
+        )
+        n_keyframes_total = len(self.keyframes)
+        n_last_keyframes_to_choose = min(
+            n_keyframes_total, self.map_config.optim_window_last_n_keyframes
+        )
+        n_random_keyframes_to_choose = min(
+            0, window_size_total - n_last_keyframes_to_choose
+        )
 
+        window = []
+
+        window = self.keyframes[-n_last_keyframes_to_choose:]
+        window.extend(
+            random.sample(
+                self.keyframes[:-n_last_keyframes_to_choose],
+                n_random_keyframes_to_choose,
+            )
+        )
+        return window
+
+    def optimize_map(self):
         for _ in (pbar := tqdm.trange(self.map_config.num_iters_mapping)):
-            window = random.sample(self.keyframes, window_size)
+            window = self.optimization_window()
             cameras = [x.camera for x in window]
             poses = torch.nn.ModuleList([x.pose for x in window])
             gt_imgs = create_batch(window, lambda x: x.img)
             self.zero_grad_all_optimizers()
 
-            render_colors, _render_alphas, _render_info = self.splats(
+            render_colors, _render_alphas, render_info = self.splats(
                 cameras,
                 poses,
             )
@@ -103,6 +126,12 @@ class Backend(torch.multiprocessing.Process):
 
             self.pruning.step(self.splats, self.splat_optimizers)
 
+        render_colors, _render_alphas, render_info = self.splats(
+            [self.keyframes[-1].camera],
+            [self.keyframes[-1].pose],
+        )
+
+        self.keyframes[-1].visible_gaussians = render_info['radii'][0] > 0
         return
 
     def sync_with_frontend(self):
@@ -176,7 +205,7 @@ class Backend(torch.multiprocessing.Process):
 
     def add_keyframe(self, frame: Frame):
         with torch.no_grad():
-            render_colors, _render_alphas, _render_info = self.splats(
+            render_colors, _render_alphas, render_info = self.splats(
                 [frame.camera],
                 [frame.pose],
             )
@@ -185,7 +214,7 @@ class Backend(torch.multiprocessing.Process):
             self.splat_optimizers,
             render_colors.squeeze(0),
             _render_alphas.squeeze(0),
-            _render_info,
+            render_info,
             frame,
             N=1000,
         )

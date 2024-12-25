@@ -39,6 +39,9 @@ class TrackingConfig:
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
 
+    kf_cov = 0.90
+    kf_oc = 0.4
+
 
 class Frontend(mp.Process):
     def __init__(
@@ -71,6 +74,8 @@ class Frontend(mp.Process):
         )
         self.logger.addHandler(handler)
 
+        self.frames: List[Frame] = []
+
         self.sensor_queue = sensor_queue
         self.frontend_done_event = frontend_done_event
         self.backend_done_event = backend_done_event
@@ -78,6 +83,10 @@ class Frontend(mp.Process):
         os.makedirs('runs/gt', exist_ok=True)
         os.makedirs('runs/renders', exist_ok=True)
         os.makedirs('runs/alphas', exist_ok=True)
+
+    def to_insert_keyframe(self, iou, _oc, _new_frame):
+        # TODO implement insertion on pose diffs
+        return iou < self.conf.kf_cov
 
     def track(self, new_frame: Frame):
         previous_keyframe = self.keyframes[-1]
@@ -112,14 +121,43 @@ class Frontend(mp.Process):
             )
 
             pbar.set_description(
-                f"Tracking frame {len(self.keyframes)}, loss: {loss.item():.3f}"
+                f"Tracking frame {len(self.frames)}, loss: {loss.item():.3f}"
             )
 
-        self.last_radii = render_info['radii'].detach().cpu().numpy()
-
-        rendered_rgbd, _rendered_alpha, _render_info = self.splats(
+        rendered_rgbd, _rendered_alpha, render_info = self.splats(
             [new_frame.camera], [new_frame.pose], render_depth=True
         )
+
+        new_frame.visible_gaussians = render_info['radii'] > 0
+        with torch.no_grad():
+            n_visible_gaussians = new_frame.visible_gaussians.sum()
+            n_visible_gaussians_last_kf = previous_keyframe.visible_gaussians.sum()
+
+            intersection = torch.logical_and(
+                new_frame.visible_gaussians, previous_keyframe.visible_gaussians
+            )
+            union = torch.logical_or(
+                new_frame.visible_gaussians, previous_keyframe.visible_gaussians
+            )
+
+            iou = intersection.sum() / union.sum()
+            oc = intersection.sum() / (
+                min(n_visible_gaussians.sum().item(), n_visible_gaussians_last_kf.sum())
+            )
+
+        self.frames.append(
+            Frame(
+                None,
+                new_frame.timestamp,
+                new_frame.camera.clone(),
+                Pose(new_frame.pose(), False),
+                new_frame.gt_pose,
+                None,
+            )
+        )
+
+        if self.to_insert_keyframe(iou, oc, new_frame):
+            self.add_keyframe(new_frame)
 
         rr.log(
             '/tracking/rendered_rgb',
@@ -166,13 +204,25 @@ class Frontend(mp.Process):
         return new_frame.pose()
 
     def request_initialization(self, frame: Frame):
+        self.frames.append(
+            Frame(
+                None,
+                frame.timestamp,
+                frame.camera.clone(),
+                Pose(frame.pose(), False),
+                frame.gt_pose,
+                None,
+            )
+        )
         self.logger.warning('Requested initialization.')
         assert not self.initialized
         self.map_queue.put([FrontendMessage.REQUEST_INITIALIZE, deepcopy(frame)])
 
     def add_keyframe(self, frame: Frame):
+        print('adding kf!')
         assert self.initialized
         self.map_queue.put([FrontendMessage.ADD_KEYFRAME, deepcopy(frame)])
+        self.waiting_for_sync = True
 
     def sync_maps(self, splats, keyframes):
         self.logger.warning('Map synced')
@@ -186,7 +236,6 @@ class Frontend(mp.Process):
                 positions=self.splats.means.detach().cpu().numpy(),
                 radii=self.splats.scales.min(dim=-1).values.detach().cpu().numpy(),
                 colors=self.splats.colors.detach().cpu().numpy(),
-                class_ids=self.last_radii,
             ),
             static=True,
         )
@@ -224,9 +273,12 @@ class Frontend(mp.Process):
             t = t.detach().cpu().numpy().reshape(-1)
             rr.log(
                 f'/tracking/pose_{i}',
-                rr.Transform3D(rotation=rr.datatypes.Quaternion(xyzw=q), translation=t),
+                rr.Transform3D(
+                    rotation=rr.datatypes.Quaternion(xyzw=q),
+                    translation=t,
+                    from_parent=True,
+                ),
                 static=True,
-                from_parent=True,
             )
             rr.log(
                 f"/tracking/pose_{i}", rr.ViewCoordinates.RDF, static=True
@@ -290,8 +342,6 @@ class Frontend(mp.Process):
                 self.waiting_for_sync = True
             else:
                 self.track(frame)
-                self.add_keyframe(frame)
-                self.waiting_for_sync = True
 
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')
