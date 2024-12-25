@@ -183,6 +183,34 @@ class Camera:
         self.intrinsics = self.intrinsics.to(device)
         return self
 
+    @torch.no_grad()
+    def backproject(self, depth_map: torch.Tensor) -> torch.Tensor:
+        fx = self.intrinsics[0, 0].item()
+        fy = self.intrinsics[1, 1].item()
+        cx = self.intrinsics[0, 2].item()
+        cy = self.intrinsics[1, 2].item()
+
+        H, W = depth_map.shape
+
+        # H, W, 2
+        grid = torch.stack(
+            torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij'), dim=-1
+        ).to(depth_map.device)
+
+        # H, W
+        us = grid[..., 0]
+        vs = grid[..., 1]
+
+        # H, W
+        xs = (us - cx) * (depth_map / fx)
+        ys = (vs - cy) * (depth_map / fy)
+
+        # H, W, 3
+        points = torch.stack([xs, ys, depth_map], axis=-1)
+
+        # HxW, 3
+        return points.reshape([-1, 3])
+
 
 @dataclass
 class Frame:

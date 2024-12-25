@@ -55,7 +55,7 @@ class GaussianSplattingData(torch.nn.Module):
         return rendered_rgb, rendered_alpha, render_info
 
     @staticmethod
-    def empty(device: str = 'cuda'):
+    def empty(device: str = 'cuda') -> Self:
         return GaussianSplattingData(
             torch.tensor([], device=device),
             torch.tensor([], device=device),

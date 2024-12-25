@@ -12,6 +12,7 @@ from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame
 from .pruning import PruneLowOpacity
+from .insertion import InsertFromDepthMap
 from .utils import create_batch
 
 
@@ -66,6 +67,9 @@ class Backend(torch.multiprocessing.Process):
         self.backend_done_event = backend_done_event
         self.splats = GaussianSplattingData.empty()
         self.pruning = PruneLowOpacity(self.map_config.opacity_pruning_threshold)
+        self.insertion = InsertFromDepthMap(
+            0.2, 0.5, 0.1, self.map_config.initial_opacity
+        )
 
     def optimize_map(self):
         window_size = min(len(self.keyframes), self.map_config.optim_window_size)
@@ -149,29 +153,43 @@ class Backend(torch.multiprocessing.Process):
         self.logger.warning('Initializing')
         frame = frame.to(self.map_config.device)
         self.keyframes = [frame]
-        self.splats = GaussianSplattingData.initialize_map_random_cube(
-            self.map_config.initial_number_of_gaussians,
-            self.map_config.initial_scale,
-            self.map_config.initial_opacity,
-            self.map_config.initial_extent,
-        ).to(self.map_config.device)
 
-        self.splats = GaussianSplattingData.initialize_in_camera_frustum(
-            self.map_config.initial_number_of_gaussians,
-            frame.camera.intrinsics[0, 0].item(),
-            frame.camera.intrinsics[0, 0].item(),
-            frame.camera.intrinsics[0, 0].item() * 4.0,
-            frame.img.shape[0],
-            frame.img.shape[1],
-        ).to(self.map_config.device)
-
+        self.splats = GaussianSplattingData.empty().to(self.map_config.device)
         self.initialize_optimizers()
+
+        self.insertion.step(
+            self.splats,
+            self.splat_optimizers,
+            torch.ones(*frame.img.shape[:2], 4, device=self.map_config.device),
+            torch.ones_like(frame.img[..., 0], device=self.map_config.device).unsqueeze(
+                -1
+            ),
+            {},
+            frame,
+            10000,
+        )
+
         self.optimize_map()
         self.queue.task_done()
         self.logger.warning('Initialized')
         return
 
     def add_keyframe(self, frame: Frame):
+        with torch.no_grad():
+            render_colors, _render_alphas, _render_info = self.splats(
+                [frame.camera],
+                [frame.pose],
+            )
+        self.insertion.step(
+            self.splats,
+            self.splat_optimizers,
+            render_colors.squeeze(0),
+            _render_alphas.squeeze(0),
+            _render_info,
+            frame,
+            N=1000,
+        )
+
         self.keyframes.append(frame)
         self.pose_optimizer.add_param_group(
             {'params': frame.pose.dt, 'lr': self.map_config.pose_optim_lr_translation}

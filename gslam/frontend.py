@@ -77,6 +77,7 @@ class Frontend(mp.Process):
         os.makedirs('runs/final', exist_ok=True)
         os.makedirs('runs/gt', exist_ok=True)
         os.makedirs('runs/renders', exist_ok=True)
+        os.makedirs('runs/alphas', exist_ok=True)
 
     def track(self, new_frame: Frame):
         previous_keyframe = self.keyframes[-1]
@@ -99,13 +100,14 @@ class Frontend(mp.Process):
             rendered_rgb, _rendered_alpha, render_info = self.splats(
                 [new_frame.camera], [new_frame.pose]
             )
+
             rendered_rgb = rendered_rgb[0]
             loss = tracking_loss(rendered_rgb, new_frame.img)
             loss.backward()
             pose_optimizer.step()
 
             rr.log(
-                'frontend/tracking/loss',
+                '/tracking/loss',
                 rr.Scalar(loss.item()),
             )
 
@@ -120,22 +122,22 @@ class Frontend(mp.Process):
         )
 
         rr.log(
-            'frontend/tracking/rendered_rgb',
+            '/tracking/rendered_rgb',
             rr.Image(torch_image_to_np(rendered_rgbd[..., :3])).compress(95),
         )
 
         rr.log(
-            'frontend/tracking/rendered_depth',
+            '/tracking/rendered_depth',
             rr.Image(torch_image_to_np(rendered_rgbd[..., 3])).compress(95),
         )
 
         rr.log(
-            'frontend/tracking/gt_rgb',
+            '/tracking/gt_rgb',
             rr.Image(torch_image_to_np(new_frame.img)).compress(95),
         )
 
         rr.log(
-            'frontend/tracking/psnr',
+            '/tracking/psnr',
             rr.Scalar(
                 psnr(
                     torch_image_to_np(rendered_rgb),
@@ -145,7 +147,7 @@ class Frontend(mp.Process):
         )
 
         rr.log(
-            'frontend/tracking/ssim',
+            '/tracking/ssim',
             rr.Scalar(
                 ssim(
                     torch_image_to_np(rendered_rgb),
@@ -157,6 +159,9 @@ class Frontend(mp.Process):
 
         torch_to_pil(rendered_rgb).save(f'runs/renders/{len(self.keyframes):08}.png')
         torch_to_pil(new_frame.img).save(f'runs/gt/{len(self.keyframes):08}.png')
+        torch_to_pil(_rendered_alpha[0, ..., 0]).save(
+            f'runs/alphas/{len(self.keyframes):08}.png'
+        )
 
         return new_frame.pose()
 
@@ -176,7 +181,7 @@ class Frontend(mp.Process):
 
     def dump_pointcloud(self):
         rr.log(
-            'frontend/tracking/pc',
+            '/tracking/pc',
             rr.Points3D(
                 positions=self.splats.means.detach().cpu().numpy(),
                 radii=self.splats.scales.min(dim=-1).values.detach().cpu().numpy(),
@@ -193,6 +198,14 @@ class Frontend(mp.Process):
                 [kf.pose],
             )
             torch_to_pil(rendered_rgb[0]).save(f'runs/final/{i:08}.png')
+
+            rr.log(
+                f'/tracking/pose_{i}/image',
+                rr.Image(
+                    torch_image_to_np(rendered_rgb[0]), color_model=rr.ColorModel.RGB
+                ).compress(jpeg_quality=95),
+            )
+
         os.system(
             'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "runs/final/*.png" -c:v libx264 -pix_fmt yuv420p runs/final.mp4'
         )
@@ -210,15 +223,35 @@ class Frontend(mp.Process):
             q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
             t = t.detach().cpu().numpy().reshape(-1)
             rr.log(
-                f'frontend/tracking/pose_{i}',
+                f'/tracking/pose_{i}',
                 rr.Transform3D(rotation=rr.datatypes.Quaternion(xyzw=q), translation=t),
                 static=True,
+                from_parent=True,
+            )
+            rr.log(
+                f"/tracking/pose_{i}", rr.ViewCoordinates.RDF, static=True
+            )  # X=Right, Y=Down, Z=Forward
+
+            rr.log(
+                f'/tracking/pose_{i}/image',
+                rr.Pinhole(
+                    resolution=[kf.camera.width, kf.camera.height],
+                    focal_length=[
+                        kf.camera.intrinsics[0, 0].item(),
+                        kf.camera.intrinsics[1, 1].item(),
+                    ],
+                    principal_point=[
+                        kf.camera.intrinsics[0, 2].item(),
+                        kf.camera.intrinsics[1, 2].item(),
+                    ],
+                ),
             )
 
     @rr.shutdown_at_exit
     def run(self):
         rr.init('gslam', recording_id='gslam_1')
         rr.save('runs/rr.rrd')
+        rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
         self.Ks = get_projection_matrix().to(self.conf.device)
 
