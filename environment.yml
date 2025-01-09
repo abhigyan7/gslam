@@ -33,5 +33,6 @@ dependencies:
     - ruff
     - viser
     - pyquaternion
-    - rerun-sdk=0.20.3
+    - rerun-sdk==0.20.3
+    - scikit-learn
     - torcheval

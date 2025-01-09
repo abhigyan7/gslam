@@ -92,6 +92,7 @@ class InsertFromDepthMap(InsertionStrategy):
         )
 
         means = frame.camera.backproject(depths)
+        colors = frame.img.reshape([-1, 3])
         random_picks = torch.randint(
             means.shape[0],
             [
@@ -99,6 +100,7 @@ class InsertFromDepthMap(InsertionStrategy):
             ],
         )
         means = means[random_picks]
+        colors = colors[random_picks]
 
         if splats.scales.size().numel() > 0:
             scales = splats.scales.mean(dim=0).tile([N, 1])
@@ -116,7 +118,7 @@ class InsertFromDepthMap(InsertionStrategy):
         new_params = {
             'means': means,
             'scales': scales,
-            'colors': torch.rand([N, 3], device=device),
+            'colors': colors,
             'opacities': torch.logit(
                 torch.full((N,), self.initial_opacity, device=device)
             ),
