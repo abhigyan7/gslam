@@ -57,3 +57,19 @@ class PruneLowOpacity(PruningStrategy):
         opacities = torch.sigmoid(splats.opacities)
         keep_mask = opacities > self.min_opacity
         return self._prune_using_mask(splats, optimizers, keep_mask)
+
+
+class PruneByVisibility(PruningStrategy):
+    def __init__(
+        self,
+    ):
+        return
+
+    @torch.no_grad()
+    def step(
+        self,
+        splats: GaussianSplattingData,
+        optimizers: Dict[str, Optimizer],
+        visibility_counts: torch.Tensor,
+    ):
+        return

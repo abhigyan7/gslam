@@ -12,7 +12,7 @@ from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame
 from .pruning import PruneLowOpacity
-from .insertion import InsertFromDepthMap
+from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
 from .utils import create_batch
 
 
@@ -68,8 +68,12 @@ class Backend(torch.multiprocessing.Process):
         self.backend_done_event = backend_done_event
         self.splats = GaussianSplattingData.empty()
         self.pruning = PruneLowOpacity(self.map_config.opacity_pruning_threshold)
-        self.insertion = InsertFromDepthMap(
+        self.insertion_depth_map = InsertFromDepthMap(
             0.2, 0.5, 0.1, self.map_config.initial_opacity
+        )
+        self.insertion_3dgs = InsertUsingImagePlaneGradients(
+            0.0002,
+            0.01,
         )
 
     def optimization_window(self):
@@ -97,14 +101,14 @@ class Backend(torch.multiprocessing.Process):
         return window
 
     def optimize_map(self):
-        for _ in (pbar := tqdm.trange(self.map_config.num_iters_mapping)):
+        for step in (pbar := tqdm.trange(self.map_config.num_iters_mapping)):
             window = self.optimization_window()
             cameras = [x.camera for x in window]
             poses = torch.nn.ModuleList([x.pose for x in window])
             gt_imgs = create_batch(window, lambda x: x.img)
             self.zero_grad_all_optimizers()
 
-            render_colors, _render_alphas, render_info = self.splats(
+            render_colors, render_alphas, render_info = self.splats(
                 cameras,
                 poses,
             )
@@ -117,7 +121,20 @@ class Backend(torch.multiprocessing.Process):
                 + self.map_config.isotropic_regularization_weight * isotropic_loss
             )
 
+            render_info['means2d'].retain_grad()
+
             total_loss.backward()
+
+            if step == (self.map_config.num_iters_mapping // 2):
+                self.insertion_3dgs.step(
+                    self.splats,
+                    self.splat_optimizers,
+                    render_colors,
+                    render_alphas,
+                    render_info,
+                    None,
+                    None,
+                )
 
             desc = f"[Mapping] loss={total_loss.item():.3f}, n_splats={self.splats.means.shape[0]:07} opacmin={torch.sigmoid(self.splats.opacities).min():.2f}"
             pbar.set_description(desc)
@@ -186,7 +203,7 @@ class Backend(torch.multiprocessing.Process):
         self.splats = GaussianSplattingData.empty().to(self.map_config.device)
         self.initialize_optimizers()
 
-        self.insertion.step(
+        self.insertion_depth_map.step(
             self.splats,
             self.splat_optimizers,
             torch.ones(*frame.img.shape[:2], 4, device=self.map_config.device),
@@ -209,7 +226,7 @@ class Backend(torch.multiprocessing.Process):
                 [frame.camera],
                 [frame.pose],
             )
-        self.insertion.step(
+        self.insertion_depth_map.step(
             self.splats,
             self.splat_optimizers,
             render_colors.squeeze(0),

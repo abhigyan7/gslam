@@ -3,14 +3,25 @@ from abc import ABC
 from .map import GaussianSplattingData
 from .primitives import Frame
 from .utils import knn
-from typing import Dict
+from typing import Dict, List
 
 from torch.optim import Optimizer
 import torch
 
+import gsplat
+
 
 class InsertionStrategy(ABC):
-    def step(self, splats: GaussianSplattingData, optimizers: Dict[str, Optimizer]):
+    def step(
+        self,
+        splats: GaussianSplattingData,
+        optimizers: Dict[str, Optimizer],
+        rendered_colors: torch.Tensor,
+        rendered_alphas: torch.Tensor,
+        meta: Dict,
+        frame: Frame,
+        N: int,
+    ):
         return
 
     @torch.no_grad()
@@ -19,7 +30,7 @@ class InsertionStrategy(ABC):
         splats: GaussianSplattingData,
         optimizers: Dict[str, Optimizer],
         new_params: Dict[str, torch.Tensor],
-    ):
+    ) -> int:
         N, _ = new_params['means'].shape
 
         # follows what gsplat does to make strategies work
@@ -49,6 +60,37 @@ class InsertionStrategy(ABC):
             splats.__setattr__(splat_param_name, new_splat_param)
         print(f"Added {N} new gaussians.")
         return N
+
+    @torch.no_grad()
+    def _duplicate(
+        self,
+        splats: GaussianSplattingData,
+        mask: torch.BoolTensor,
+    ) -> Dict[str, torch.Tensor]:
+        ret = dict()
+        for splat_param_name, splat_param in splats.named_parameters():
+            ret[splat_param_name] = splat_param[mask].clone().detach()
+        return ret
+
+    @torch.no_grad()
+    def _split(
+        self,
+        splats: GaussianSplattingData,
+        mask: torch.BoolTensor,
+    ) -> GaussianSplattingData:
+        ret = dict()
+        for splat_param_name, splat_param in splats.named_parameters():
+            ret[splat_param_name] = splat_param[mask].clone().detach()
+
+        covars, _precis = gsplat.quat_scale_to_covar_preci(
+            ret['quats'],
+            ret['scales'],
+        )
+        noise = torch.randn_like(ret['means'])
+        noise = torch.einsum("bij,bj->bi", covars, noise)
+        ret['means'].add_(noise)
+        ret['opacities'].multiply_(1.0 / 1.6)
+        return ret
 
 
 class InsertFromDepthMap(InsertionStrategy):
@@ -126,3 +168,90 @@ class InsertFromDepthMap(InsertionStrategy):
         }
 
         self._add_new_splats(splats, optimizers, new_params)
+
+
+class InsertUsingImagePlaneGradients(InsertionStrategy):
+    '''
+    Insertion strategy that the original 3DGS paper uses
+    '''
+
+    def __init__(
+        self,
+        grow_grad2d: float,
+        grow_scale3d: float,
+    ):
+        self.grow_grad2d = grow_grad2d
+        self.grow_scale3d = grow_scale3d
+
+    @torch.no_grad()
+    def step(
+        self,
+        splats: GaussianSplattingData,
+        optimizers: Dict[str, Optimizer],
+        rendered_colors: torch.Tensor,
+        rendered_alphas: torch.Tensor,
+        meta: Dict,
+        frame: Frame,
+        N: int,
+    ):
+        grads = meta['means2d'].grad.clone()
+
+        # normalize grads by image size
+        grads[..., 0] *= meta["width"] / 2.0 * meta["n_cameras"]
+        grads[..., 1] *= meta["height"] / 2.0 * meta["n_cameras"]
+
+        print(f'{grads.shape=}')
+        grads = grads.norm(dim=-1).mean(dim=0)
+
+        has_high_image_plane_grad = grads > self.grow_grad2d
+        is_small = torch.exp(splats.scales).max(dim=-1).values <= self.grow_scale3d
+
+        print(f'{grads.shape=}')
+        print(f'{has_high_image_plane_grad.shape=}')
+        print(f'{is_small.shape=}')
+
+        to_duplicate = has_high_image_plane_grad & is_small
+
+        is_large = ~is_small
+        to_split = has_high_image_plane_grad & is_large
+
+        num_split = to_split.sum().detach()
+        num_duplicate = to_duplicate.sum().detach()
+
+        if num_duplicate > 0:
+            duplicated_splats = self._duplicate(splats, mask=to_duplicate)
+        if num_split > 0:
+            split_splats = self._split(splats, mask=to_split)
+
+        if num_duplicate > 0:
+            self._add_new_splats(splats, optimizers, duplicated_splats)
+        if num_split > 0:
+            self._add_new_splats(splats, optimizers, split_splats)
+
+        return num_duplicate, num_split
+
+
+class SequentialInsertion(InsertionStrategy):
+    def __init__(self, strategies: List[InsertionStrategy]):
+        self.strategies = strategies
+
+    def step(
+        self,
+        splats: GaussianSplattingData,
+        optimizers: Dict[str, Optimizer],
+        rendered_colors: torch.Tensor,
+        rendered_alphas: torch.Tensor,
+        meta: Dict,
+        frame: Frame,
+        N: int,
+    ):
+        for strategy in self.strategies:
+            strategy.step(
+                splats,
+                optimizers,
+                rendered_colors,
+                rendered_alphas,
+                meta,
+                frame,
+                N,
+            )
