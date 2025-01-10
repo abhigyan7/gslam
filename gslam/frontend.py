@@ -1,9 +1,11 @@
-import logging
 from copy import deepcopy
 from dataclasses import dataclass
-from threading import Event
-from typing import List
+from datetime import datetime
+import logging
 import os
+from pathlib import Path
+from threading import Event
+from typing import List, Literal, assert_never
 
 import torch
 import torch.multiprocessing as mp
@@ -18,24 +20,19 @@ from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, Pose
 from .rasterization import RasterizerConfig
+from .trajectory import kabsch_umeyama, average_translation_error
 from .utils import get_projection_matrix, q_get, torch_image_to_np, torch_to_pil
 
 
+import matplotlib.pyplot as plt
 import numpy as np
-
-
-def tracking_loss(
-    gt_img: torch.Tensor,
-    rendered_img: torch.Tensor,
-):
-    return (rendered_img - gt_img).abs().mean()
 
 
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
     num_tracking_iters: int = 100
-    photometric_loss: str = 'l1'
+    photometric_loss: Literal['l1', 'mse'] = 'l1'
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
 
@@ -75,18 +72,37 @@ class Frontend(mp.Process):
         self.logger.addHandler(handler)
 
         self.frames: List[Frame] = []
+        self.frozen_keyframes: List[Frame] = []
 
         self.sensor_queue = sensor_queue
         self.frontend_done_event = frontend_done_event
         self.backend_done_event = backend_done_event
-        os.makedirs('runs/final', exist_ok=True)
-        os.makedirs('runs/gt', exist_ok=True)
-        os.makedirs('runs/renders', exist_ok=True)
-        os.makedirs('runs/alphas', exist_ok=True)
+
+        runs_dir = Path('runs')
+        self.output_dir = runs_dir / datetime.now().strftime('%Y-%m-%d--%H-%M-%S')
+
+        os.makedirs(self.output_dir / 'final', exist_ok=True)
+        os.makedirs(self.output_dir / 'gt', exist_ok=True)
+        os.makedirs(self.output_dir / 'renders', exist_ok=True)
+        os.makedirs(self.output_dir / 'alphas', exist_ok=True)
 
     def to_insert_keyframe(self, iou, _oc, _new_frame):
         # TODO implement insertion on pose diffs
         return iou < self.conf.kf_cov
+
+    def tracking_loss(
+        self,
+        gt_img: torch.Tensor,
+        rendered_img: torch.Tensor,
+    ) -> torch.Tensor:
+        error = rendered_img - gt_img
+        match self.conf.photometric_loss:
+            case 'l1':
+                return error.abs().mean()
+            case 'mse':
+                return error.square().mean()
+            case _:
+                assert_never(self.conf.photometric_loss)
 
     def track(self, new_frame: Frame):
         previous_keyframe = self.keyframes[-1]
@@ -111,7 +127,7 @@ class Frontend(mp.Process):
             )
 
             rendered_rgb = rendered_rgb[0]
-            loss = tracking_loss(rendered_rgb, new_frame.img)
+            loss = self.tracking_loss(rendered_rgb, new_frame.img)
             loss.backward()
             pose_optimizer.step()
 
@@ -195,10 +211,14 @@ class Frontend(mp.Process):
             ),
         )
 
-        torch_to_pil(rendered_rgb).save(f'runs/renders/{len(self.keyframes):08}.png')
-        torch_to_pil(new_frame.img).save(f'runs/gt/{len(self.keyframes):08}.png')
+        torch_to_pil(rendered_rgb).save(
+            self.output_dir / f'renders/{len(self.keyframes):08}.png'
+        )
+        torch_to_pil(new_frame.img).save(
+            self.output_dir / f'gt/{len(self.keyframes):08}.png'
+        )
         torch_to_pil(_rendered_alpha[0, ..., 0]).save(
-            f'runs/alphas/{len(self.keyframes):08}.png'
+            self.output_dir / f'alphas/{len(self.keyframes):08}.png'
         )
 
         return new_frame.pose()
@@ -214,6 +234,7 @@ class Frontend(mp.Process):
                 None,
             )
         )
+        self.frozen_keyframes.append(frame)
         self.logger.warning('Requested initialization.')
         assert not self.initialized
         self.map_queue.put([FrontendMessage.REQUEST_INITIALIZE, deepcopy(frame)])
@@ -221,6 +242,7 @@ class Frontend(mp.Process):
     def add_keyframe(self, frame: Frame):
         print('adding kf!')
         assert self.initialized
+        self.frozen_keyframes.append(frame)
         self.map_queue.put([FrontendMessage.ADD_KEYFRAME, deepcopy(frame)])
         self.waiting_for_sync = True
 
@@ -246,7 +268,7 @@ class Frontend(mp.Process):
                 [kf.camera],
                 [kf.pose],
             )
-            torch_to_pil(rendered_rgb[0]).save(f'runs/final/{i:08}.png')
+            torch_to_pil(rendered_rgb[0]).save(self.output_dir / f'final/{i:08}.png')
 
             rr.log(
                 f'/tracking/pose_{i}/image',
@@ -256,19 +278,88 @@ class Frontend(mp.Process):
             )
 
         os.system(
-            'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "runs/final/*.png" -c:v libx264 -pix_fmt yuv420p runs/final.mp4'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final/*.png" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final.mp4"}'
         )
         os.system(
-            'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "runs/gt/*.png" -c:v libx264 -pix_fmt yuv420p runs/gt.mp4'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/gt/*.png" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"gt.mp4"}'
         )
         os.system(
-            'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "runs/renders/*.png" -c:v libx264 -pix_fmt yuv420p runs/renders.mp4'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/renders/*.png" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"renders.mp4"}'
         )
-        # os.system(f'rm runs/*/*.png')
 
+    @torch.no_grad
     def dump_trajectory(self):
-        for i, kf in enumerate(self.keyframes):
-            q, t = kf.pose.to_qt()
+        Rts = [f.pose().cpu().numpy() for f in self.frozen_keyframes]
+        ts = np.array([Rt[:3, 3] for Rt in Rts])
+        gt_Rts = [f.gt_pose.cpu().numpy() for f in self.frozen_keyframes]
+        gt_ts = np.array([Rt[:3, 3] for Rt in gt_Rts])
+
+        R, c, t = kabsch_umeyama(gt_ts, ts)
+        # TODO might need to get rid of this, it sets the first frames
+        # to be in the same location for the gt and estimated trajectory
+        # for easy comparision in plots
+        t = gt_ts[0, ...]
+        aligned_ts = np.array([t + c * R @ b for b in ts])
+
+        fig, ax = plt.subplots()
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.plot(gt_ts[..., 0], gt_ts[..., 1], label='ground truth')
+        ax.plot(aligned_ts[..., 0], aligned_ts[..., 1], label='gslam')
+        ax.set_aspect('equal')
+        ax.legend()
+        fig.savefig(self.output_dir / 'frozen_keyframes.png')
+
+        Rts = [f.pose().cpu().numpy() for f in self.frames]
+        ts = np.array([Rt[:3, 3] for Rt in Rts])
+        gt_Rts = [f.gt_pose.cpu().numpy() for f in self.frames]
+        gt_ts = np.array([Rt[:3, 3] for Rt in gt_Rts])
+
+        R, c, t = kabsch_umeyama(gt_ts, ts)
+        # TODO might need to get rid of this, it sets the first frames
+        # to be in the same location for the gt and estimated trajectory
+        # for easy comparision in plots
+        t = gt_ts[0, ...]
+        aligned_ts = np.array([t + c * R @ b for b in ts])
+
+        fig, ax = plt.subplots()
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.plot(gt_ts[..., 0], gt_ts[..., 1], label='ground truth')
+        ax.plot(aligned_ts[..., 0], aligned_ts[..., 1], label='gslam')
+        ax.set_aspect('equal')
+        ax.legend()
+        fig.savefig(self.output_dir / 'traj.png')
+
+        ate = average_translation_error(gt_ts, ts)
+        print(f'{ate=}')
+
+        Rts = [f.pose().cpu().numpy() for f in self.keyframes]
+        ts = np.array([Rt[:3, 3] for Rt in Rts])
+        gt_Rts = [f.gt_pose.cpu().numpy() for f in self.keyframes]
+        gt_ts = np.array([Rt[:3, 3] for Rt in gt_Rts])
+
+        R, c, t = kabsch_umeyama(gt_ts, ts)
+        # TODO might need to get rid of this, it sets the first frames
+        # to be in the same location for the gt and estimated trajectory
+        # for easy comparision in plots
+        t = gt_ts[0, ...]
+        aligned_ts = np.array([t + c * R @ b for b in ts])
+
+        fig, ax = plt.subplots()
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.plot(gt_ts[..., 0], gt_ts[..., 1], label='ground truth')
+        ax.plot(aligned_ts[..., 0], aligned_ts[..., 1], label='gslam')
+        ax.set_aspect('equal')
+        ax.legend()
+        fig.savefig(self.output_dir / 'map_traj.png')
+
+        ate = average_translation_error(gt_ts, ts)
+        print(f'{ate=}')
+
+        for i, f in enumerate(self.frames):
+            q, t = f.pose.to_qt()
             q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
             t = t.detach().cpu().numpy().reshape(-1)
             rr.log(
@@ -287,14 +378,14 @@ class Frontend(mp.Process):
             rr.log(
                 f'/tracking/pose_{i}/image',
                 rr.Pinhole(
-                    resolution=[kf.camera.width, kf.camera.height],
+                    resolution=[f.camera.width, f.camera.height],
                     focal_length=[
-                        kf.camera.intrinsics[0, 0].item(),
-                        kf.camera.intrinsics[1, 1].item(),
+                        f.camera.intrinsics[0, 0].item(),
+                        f.camera.intrinsics[1, 1].item(),
                     ],
                     principal_point=[
-                        kf.camera.intrinsics[0, 2].item(),
-                        kf.camera.intrinsics[1, 2].item(),
+                        f.camera.intrinsics[0, 2].item(),
+                        f.camera.intrinsics[1, 2].item(),
                     ],
                 ),
             )
@@ -302,7 +393,7 @@ class Frontend(mp.Process):
     @rr.shutdown_at_exit
     def run(self):
         rr.init('gslam', recording_id='gslam_1')
-        rr.save('runs/rr.rrd')
+        rr.save(self.output_dir / 'rr.rrd')
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
         self.Ks = get_projection_matrix().to(self.conf.device)

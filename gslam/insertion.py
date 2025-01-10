@@ -133,16 +133,30 @@ class InsertFromDepthMap(InsertionStrategy):
             random_depths[~valid_depth_region] * self.depth_variance
         )
 
+        pixel_indices_where_depth_is_valid = torch.nonzero(
+            valid_depth_region.reshape(-1)
+        )
+        picks = [
+            torch.nonzero(~valid_depth_region.reshape(-1)).reshape(-1),
+            (
+                pixel_indices_where_depth_is_valid[
+                    torch.randint(
+                        pixel_indices_where_depth_is_valid.shape[0],
+                        [
+                            N,
+                        ],
+                    )
+                ]
+            ).reshape(-1),
+        ]
+
+        picks = torch.cat(picks)
+        N = picks.shape[0]
+
         means = frame.camera.backproject(depths)
         colors = frame.img.reshape([-1, 3])
-        random_picks = torch.randint(
-            means.shape[0],
-            [
-                N,
-            ],
-        )
-        means = means[random_picks]
-        colors = colors[random_picks]
+        means = means[picks]
+        colors = colors[picks]
 
         if splats.scales.size().numel() > 0:
             scales = splats.scales.mean(dim=0).tile([N, 1])

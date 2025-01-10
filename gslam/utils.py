@@ -6,10 +6,14 @@ from PIL import Image
 from sklearn.neighbors import NearestNeighbors
 
 import functools
-from typing import Callable
+from typing import Callable, TypeVar, List
+
+T1 = TypeVar("T1")
 
 
-def create_batch(things, getter):
+def create_batch(
+    things: List[T1], getter: Callable[[T1], torch.Tensor]
+) -> torch.Tensor:
     things = [getter(thing) for thing in things]
     return torch.stack(things, dim=0)
 
@@ -51,29 +55,6 @@ def q_get(queue: Queue):
     if queue.empty():
         return None
     return queue.get()
-
-
-def kabsch_umeyama(A, B):
-    """
-    implementation from https://zpl.fi/aligning-point-patterns-with-kabsch-umeyama-algorithm/
-    """
-    assert A.shape == B.shape
-    n, m = A.shape
-
-    EA = np.mean(A, axis=0)
-    EB = np.mean(B, axis=0)
-    VarA = np.mean(np.linalg.norm(A - EA, axis=1) ** 2)
-
-    H = ((A - EA).T @ (B - EB)) / n
-    U, D, VT = np.linalg.svd(H)
-    d = np.sign(np.linalg.det(U) * np.linalg.det(VT))
-    S = np.diag([1] * (m - 1) + [d])
-
-    R = U @ S @ VT
-    c = VarA / np.trace(np.diag(D) @ S)
-    t = EA - c * R @ EB
-
-    return R, c, t
 
 
 def unvmap(func: Callable[[torch.Tensor], torch.Tensor]):
