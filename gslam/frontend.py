@@ -165,20 +165,20 @@ class Frontend(mp.Process):
                 min(n_visible_gaussians.sum().item(), n_visible_gaussians_last_kf.sum())
             )
 
-        rr.log(
-            '/tracking/rendered_rgb',
-            rr.Image(torch_image_to_np(rendered_rgb)).compress(95),
-        )
+        # rr.log(
+        #     '/tracking/rendered_rgb',
+        #     rr.Image(torch_image_to_np(rendered_rgb)).compress(95),
+        # )
 
-        rr.log(
-            '/tracking/rendered_depth',
-            rr.Image(torch_image_to_np(rendered_depth)).compress(95),
-        )
+        # rr.log(
+        #     '/tracking/rendered_depth',
+        #     rr.Image(torch_image_to_np(rendered_depth)).compress(95),
+        # )
 
-        rr.log(
-            '/tracking/gt_rgb',
-            rr.Image(torch_image_to_np(new_frame.img)).compress(95),
-        )
+        # rr.log(
+        #     '/tracking/gt_rgb',
+        #     rr.Image(torch_image_to_np(new_frame.img)).compress(95),
+        # )
 
         rr.log(
             '/tracking/psnr',

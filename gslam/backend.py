@@ -19,6 +19,7 @@ from .utils import create_batch
 @dataclass
 class MapConfig:
     isotropic_regularization_weight: float = 10.0
+    opacity_regularization_weight: float = 0.000005
 
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
@@ -45,7 +46,7 @@ class MapConfig:
     optim_window_last_n_keyframes: int = 5
     optim_window_random_keyframes: int = 5
 
-    num_iters_mapping: int = 150
+    num_iters_mapping: int = 200
 
     opacity_pruning_threshold: float = 0.6
 
@@ -119,6 +120,7 @@ class Backend(torch.multiprocessing.Process):
             total_loss = (
                 photometric_loss
                 + self.map_config.isotropic_regularization_weight * isotropic_loss
+                + self.map_config.opacity_regularization_weight * self.splats.opacities.mean()
             )
 
             render_info['means2d'].retain_grad()
