@@ -36,3 +36,4 @@ dependencies:
     - rerun-sdk==0.20.3
     - scikit-learn
     - torcheval
+    - matplotlib
