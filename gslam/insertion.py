@@ -117,13 +117,18 @@ class InsertFromDepthMap(InsertionStrategy):
         frame: Frame,
         N: int,
     ):
+        # depths = rendered_colors[..., -1] * frame.camera.intrinsics[0,0].item()
         depths = rendered_colors[..., -1]
         device = depths.device
-        valid_depth_region = rendered_alphas[..., 0] > self.min_alpha_for_depth
+        valid_depth_region = torch.logical_and(
+            rendered_alphas[..., 0] > self.min_alpha_for_depth,
+            depths > 0
+        )
 
         median_depth = depths[valid_depth_region].median()
+        print(f'{median_depth=}')
 
-        random_depths = torch.randn_like(depths)
+        random_depths = torch.randn_like(depths, device=device)
 
         depths[valid_depth_region] += (
             random_depths[valid_depth_region] * self.depth_variance
@@ -136,27 +141,44 @@ class InsertFromDepthMap(InsertionStrategy):
         pixel_indices_where_depth_is_valid = torch.nonzero(
             valid_depth_region.reshape(-1)
         )
-        picks = [
-            torch.nonzero(~valid_depth_region.reshape(-1)).reshape(-1),
-            (
-                pixel_indices_where_depth_is_valid[
+        pixel_indices_where_depth_is_not_valid = torch.nonzero(
+            ~valid_depth_region.reshape(-1)
+        )
+        picks = []
+
+        if pixel_indices_where_depth_is_not_valid.shape[0] > 0:
+            picks.append(
+                (pixel_indices_where_depth_is_not_valid[
+                    torch.randint(
+                        pixel_indices_where_depth_is_not_valid.shape[0],
+                        [
+                            N,
+                        ],
+                    )
+                ]).reshape(-1),
+            )
+        if pixel_indices_where_depth_is_valid.shape[0] > 0:
+            picks.append(
+                (pixel_indices_where_depth_is_valid[
                     torch.randint(
                         pixel_indices_where_depth_is_valid.shape[0],
                         [
                             N,
                         ],
                     )
-                ]
-            ).reshape(-1),
-        ]
+                ]).reshape(-1),
+            )
 
         picks = torch.cat(picks)
+
         N = picks.shape[0]
 
         means = frame.camera.backproject(depths)
         colors = frame.img.reshape([-1, 3])
         means = means[picks]
         colors = colors[picks]
+
+        print(f"{means.mean()=}")
 
         if splats.scales.size().numel() > 0:
             scales = splats.scales.mean(dim=0).tile([N, 1])
@@ -214,15 +236,10 @@ class InsertUsingImagePlaneGradients(InsertionStrategy):
         grads[..., 0] *= meta["width"] / 2.0 * meta["n_cameras"]
         grads[..., 1] *= meta["height"] / 2.0 * meta["n_cameras"]
 
-        print(f'{grads.shape=}')
         grads = grads.norm(dim=-1).mean(dim=0)
 
         has_high_image_plane_grad = grads > self.grow_grad2d
         is_small = torch.exp(splats.scales).max(dim=-1).values <= self.grow_scale3d
-
-        print(f'{grads.shape=}')
-        print(f'{has_high_image_plane_grad.shape=}')
-        print(f'{is_small.shape=}')
 
         to_duplicate = has_high_image_plane_grad & is_small
 

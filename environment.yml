@@ -14,6 +14,7 @@ dependencies:
   - nvidia/label/cuda-12.1.0::cuda-nvcc
   - nvidia/label/cuda-12.1.0::cuda-cudart
   - nvidia/label/cuda-12.1.0::cuda-toolkit
+  - nvidia/label/cuda-12.1.0::libcurand-dev
   - nvidia/label/cuda-12.1.0::cuda-cudart-dev
   - python=3.11
   - pip
@@ -37,3 +38,4 @@ dependencies:
     - scikit-learn
     - torcheval
     - matplotlib
+    - pytest

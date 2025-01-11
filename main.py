@@ -11,7 +11,7 @@ import gc
 
 # @rr.shutdown_at_exit
 def main(seq_len: int = -1):
-    tum_dataset = TumRGB('../datasets/tum/rgbd_dataset_freiburg1_desk', seq_len)
+    tum_dataset = TumRGB('../../datasets/tum/rgbd_dataset_freiburg1_xyz', seq_len)
 
     dataset_queue = mp.JoinableQueue()
     frontend_to_backend_queue = mp.JoinableQueue()

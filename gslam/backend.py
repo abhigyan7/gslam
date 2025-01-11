@@ -203,6 +203,8 @@ class Backend(torch.multiprocessing.Process):
         self.splats = GaussianSplattingData.empty().to(self.map_config.device)
         self.initialize_optimizers()
 
+        # f = frame.camera.intrinsics[0,0].item()
+
         self.insertion_depth_map.step(
             self.splats,
             self.splat_optimizers,
@@ -233,7 +235,7 @@ class Backend(torch.multiprocessing.Process):
             _render_alphas.squeeze(0),
             render_info,
             frame,
-            N=1000,
+            N=5000,
         )
 
         self.keyframes.append(frame)

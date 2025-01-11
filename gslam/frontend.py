@@ -85,6 +85,7 @@ class Frontend(mp.Process):
         os.makedirs(self.output_dir / 'gt', exist_ok=True)
         os.makedirs(self.output_dir / 'renders', exist_ok=True)
         os.makedirs(self.output_dir / 'alphas', exist_ok=True)
+        os.makedirs(self.output_dir / 'depths', exist_ok=True)
 
     def to_insert_keyframe(self, iou, _oc, _new_frame):
         # TODO implement insertion on pose diffs
@@ -140,12 +141,15 @@ class Frontend(mp.Process):
                 f"Tracking frame {len(self.frames)}, loss: {loss.item():.3f}"
             )
 
-        rendered_rgbd, _rendered_alpha, render_info = self.splats(
-            [new_frame.camera], [new_frame.pose], render_depth=True
-        )
-
-        new_frame.visible_gaussians = render_info['radii'] > 0
         with torch.no_grad():
+            rendered_rgbd, _rendered_alpha, render_info = self.splats(
+                [new_frame.camera], [new_frame.pose], render_depth=True
+            )
+            rendered_rgb = rendered_rgbd[0, ..., :3]
+            rendered_depth = rendered_rgbd[0, ..., 3]
+
+            new_frame.visible_gaussians = render_info['radii'] > 0
+
             n_visible_gaussians = new_frame.visible_gaussians.sum()
             n_visible_gaussians_last_kf = previous_keyframe.visible_gaussians.sum()
 
@@ -161,28 +165,14 @@ class Frontend(mp.Process):
                 min(n_visible_gaussians.sum().item(), n_visible_gaussians_last_kf.sum())
             )
 
-        self.frames.append(
-            Frame(
-                None,
-                new_frame.timestamp,
-                new_frame.camera.clone(),
-                Pose(new_frame.pose(), False),
-                new_frame.gt_pose,
-                None,
-            )
-        )
-
-        if self.to_insert_keyframe(iou, oc, new_frame):
-            self.add_keyframe(new_frame)
-
         rr.log(
             '/tracking/rendered_rgb',
-            rr.Image(torch_image_to_np(rendered_rgbd[..., :3])).compress(95),
+            rr.Image(torch_image_to_np(rendered_rgb)).compress(95),
         )
 
         rr.log(
             '/tracking/rendered_depth',
-            rr.Image(torch_image_to_np(rendered_rgbd[..., 3])).compress(95),
+            rr.Image(torch_image_to_np(rendered_depth)).compress(95),
         )
 
         rr.log(
@@ -212,14 +202,33 @@ class Frontend(mp.Process):
         )
 
         torch_to_pil(rendered_rgb).save(
-            self.output_dir / f'renders/{len(self.keyframes):08}.png'
+            self.output_dir / f'renders/{len(self.frames):08}.jpg'
         )
         torch_to_pil(new_frame.img).save(
-            self.output_dir / f'gt/{len(self.keyframes):08}.png'
+            self.output_dir / f'gt/{len(self.frames):08}.jpg'
         )
+
         torch_to_pil(_rendered_alpha[0, ..., 0]).save(
-            self.output_dir / f'alphas/{len(self.keyframes):08}.png'
+            self.output_dir / f'alphas/{len(self.frames):08}.jpg'
         )
+
+        torch_to_pil(rendered_depth).save(
+            self.output_dir / f'depths/{len(self.frames):08}.jpg'
+        )
+
+        self.frames.append(
+            Frame(
+                None,
+                new_frame.timestamp,
+                new_frame.camera.clone(),
+                Pose(new_frame.pose(), False),
+                new_frame.gt_pose,
+                None,
+            )
+        )
+
+        if self.to_insert_keyframe(iou, oc, new_frame):
+            self.add_keyframe(new_frame)
 
         return new_frame.pose()
 
@@ -256,8 +265,8 @@ class Frontend(mp.Process):
             '/tracking/pc',
             rr.Points3D(
                 positions=self.splats.means.detach().cpu().numpy(),
-                radii=self.splats.scales.min(dim=-1).values.detach().cpu().numpy(),
-                colors=self.splats.colors.detach().cpu().numpy(),
+                radii=self.splats.scales.min(dim=-1).values.detach().cpu().numpy()*0.5,
+                colors=torch.cat([self.splats.colors, torch.sigmoid(self.splats.opacities)[..., None]], dim=1).detach().cpu().numpy(),
             ),
             static=True,
         )
@@ -268,7 +277,7 @@ class Frontend(mp.Process):
                 [kf.camera],
                 [kf.pose],
             )
-            torch_to_pil(rendered_rgb[0]).save(self.output_dir / f'final/{i:08}.png')
+            torch_to_pil(rendered_rgb[0]).save(self.output_dir / f'final/{i:08}.jpg')
 
             rr.log(
                 f'/tracking/pose_{i}/image',
@@ -278,13 +287,13 @@ class Frontend(mp.Process):
             )
 
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final/*.png" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final.mp4"}'
         )
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/gt/*.png" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"gt.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/gt/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"gt.mp4"}'
         )
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/renders/*.png" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"renders.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/renders/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"renders.mp4"}'
         )
 
     @torch.no_grad
