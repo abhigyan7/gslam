@@ -121,8 +121,7 @@ class InsertFromDepthMap(InsertionStrategy):
         depths = rendered_colors[..., -1]
         device = depths.device
         valid_depth_region = torch.logical_and(
-            rendered_alphas[..., 0] > self.min_alpha_for_depth,
-            depths > 0
+            rendered_alphas[..., 0] > self.min_alpha_for_depth, depths > 0
         )
 
         median_depth = depths[valid_depth_region].median()
@@ -148,25 +147,29 @@ class InsertFromDepthMap(InsertionStrategy):
 
         if pixel_indices_where_depth_is_not_valid.shape[0] > 0:
             picks.append(
-                (pixel_indices_where_depth_is_not_valid[
-                    torch.randint(
-                        pixel_indices_where_depth_is_not_valid.shape[0],
-                        [
-                            N,
-                        ],
-                    )
-                ]).reshape(-1),
+                (
+                    pixel_indices_where_depth_is_not_valid[
+                        torch.randint(
+                            pixel_indices_where_depth_is_not_valid.shape[0],
+                            [
+                                N,
+                            ],
+                        )
+                    ]
+                ).reshape(-1),
             )
         if pixel_indices_where_depth_is_valid.shape[0] > 0:
             picks.append(
-                (pixel_indices_where_depth_is_valid[
-                    torch.randint(
-                        pixel_indices_where_depth_is_valid.shape[0],
-                        [
-                            N,
-                        ],
-                    )
-                ]).reshape(-1),
+                (
+                    pixel_indices_where_depth_is_valid[
+                        torch.randint(
+                            pixel_indices_where_depth_is_valid.shape[0],
+                            [
+                                N,
+                            ],
+                        )
+                    ]
+                ).reshape(-1),
             )
 
         picks = torch.cat(picks)

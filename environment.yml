@@ -39,3 +39,5 @@ dependencies:
     - torcheval
     - matplotlib
     - pytest
+    - pre-commit
+

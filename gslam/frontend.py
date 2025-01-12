@@ -262,8 +262,18 @@ class Frontend(mp.Process):
             '/tracking/pc',
             rr.Points3D(
                 positions=self.splats.means.detach().cpu().numpy(),
-                radii=self.splats.scales.min(dim=-1).values.detach().cpu().numpy()*0.5,
-                colors=torch.cat([self.splats.colors, torch.sigmoid(self.splats.opacities)[..., None]], dim=1).detach().cpu().numpy(),
+                radii=self.splats.scales.min(dim=-1).values.detach().cpu().numpy()
+                * 0.5,
+                colors=torch.cat(
+                    [
+                        self.splats.colors,
+                        torch.sigmoid(self.splats.opacities)[..., None],
+                    ],
+                    dim=1,
+                )
+                .detach()
+                .cpu()
+                .numpy(),
             ),
             static=True,
         )

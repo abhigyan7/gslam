@@ -120,7 +120,8 @@ class Backend(torch.multiprocessing.Process):
             total_loss = (
                 photometric_loss
                 + self.map_config.isotropic_regularization_weight * isotropic_loss
-                + self.map_config.opacity_regularization_weight * self.splats.opacities.mean()
+                + self.map_config.opacity_regularization_weight
+                * self.splats.opacities.mean()
             )
 
             render_info['means2d'].retain_grad()
