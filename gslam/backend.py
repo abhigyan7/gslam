@@ -10,7 +10,7 @@ import tqdm
 
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
-from .primitives import Frame
+from .primitives import Frame, Pose
 from .pruning import PruneLowOpacity
 from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
 from .utils import create_batch
@@ -20,10 +20,11 @@ from .utils import create_batch
 class MapConfig:
     isotropic_regularization_weight: float = 10.0
     opacity_regularization_weight: float = 0.000005
+    betas_regularization_weight: float = 0.05
 
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
-    pose_optimization_regularization = 1e-6
+    pose_optimization_regularization: float = 1e-6
 
     # 3dgs schedules means_lr, might need to look into this
     means_lr: float = 0.00016
@@ -56,13 +57,13 @@ class MapConfig:
 class Backend(torch.multiprocessing.Process):
     def __init__(
         self,
-        map_config: MapConfig,
+        conf: MapConfig,
         queue: torch.multiprocessing.Queue,
         frontend_queue: torch.multiprocessing.Queue,
         backend_done_event: threading.Event,
     ):
         super().__init__()
-        self.map_config = map_config
+        self.conf = conf
         self.queue: torch.multiprocessing.Queue = queue
         self.frontend_queue = frontend_queue
         self.logger = logging.getLogger(__name__)
@@ -70,9 +71,9 @@ class Backend(torch.multiprocessing.Process):
         self.keyframes: List[Frame] = []
         self.backend_done_event = backend_done_event
         self.splats = GaussianSplattingData.empty()
-        self.pruning = PruneLowOpacity(self.map_config.opacity_pruning_threshold)
+        self.pruning = PruneLowOpacity(self.conf.opacity_pruning_threshold)
         self.insertion_depth_map = InsertFromDepthMap(
-            0.2, 0.5, 0.1, self.map_config.initial_opacity, self.map_config.initial_beta
+            0.2, 0.5, 0.1, self.conf.initial_opacity, self.conf.initial_beta
         )
         self.insertion_3dgs = InsertUsingImagePlaneGradients(
             0.0002,
@@ -81,12 +82,12 @@ class Backend(torch.multiprocessing.Process):
 
     def optimization_window(self):
         window_size_total = (
-            self.map_config.optim_window_last_n_keyframes
-            + self.map_config.optim_window_random_keyframes
+            self.conf.optim_window_last_n_keyframes
+            + self.conf.optim_window_random_keyframes
         )
         n_keyframes_total = len(self.keyframes)
         n_last_keyframes_to_choose = min(
-            n_keyframes_total, self.map_config.optim_window_last_n_keyframes
+            n_keyframes_total, self.conf.optim_window_last_n_keyframes
         )
         n_random_keyframes_to_choose = min(
             0, window_size_total - n_last_keyframes_to_choose
@@ -104,7 +105,7 @@ class Backend(torch.multiprocessing.Process):
         return window
 
     def optimize_map(self):
-        for step in (pbar := tqdm.trange(self.map_config.num_iters_mapping)):
+        for step in (pbar := tqdm.trange(self.conf.num_iters_mapping)):
             window = self.optimization_window()
             cameras = [x.camera for x in window]
             poses = torch.nn.ModuleList([x.pose for x in window])
@@ -116,21 +117,25 @@ class Backend(torch.multiprocessing.Process):
                 poses,
             )
 
-            photometric_loss = (render_colors - gt_imgs).abs().mean()
+            # unsqueeze so that broadcast multiplication works out
+            inv_betas = render_info['betas'].pow(-1.0).unsqueeze(-1)
+            photometric_loss = ((render_colors - gt_imgs) * inv_betas).square().mean()
             mean_scales = self.splats.scales.mean(dim=1, keepdim=True).detach()
             isotropic_loss = (self.splats.scales - mean_scales).abs().mean()
+            betas_loss = self.splats.betas.mean()
+            opacity_loss = self.splats.opacities.mean()
             total_loss = (
                 photometric_loss
-                + self.map_config.isotropic_regularization_weight * isotropic_loss
-                + self.map_config.opacity_regularization_weight
-                * self.splats.opacities.mean()
+                + self.conf.isotropic_regularization_weight * isotropic_loss
+                + self.conf.opacity_regularization_weight * opacity_loss
+                + self.conf.betas_regularization_weight * betas_loss
             )
 
             render_info['means2d'].retain_grad()
 
             total_loss.backward()
 
-            if step == (self.map_config.num_iters_mapping // 2):
+            if step == (self.conf.num_iters_mapping // 2):
                 self.insertion_3dgs.step(
                     self.splats,
                     self.splat_optimizers,
@@ -177,27 +182,27 @@ class Backend(torch.multiprocessing.Process):
         self.splat_optimizers: Dict[str, torch.optim.Optimizer] = {}
         self.splat_optimizers['means'] = torch.optim.Adam(
             params=[self.splats.means],
-            lr=self.map_config.means_lr,
+            lr=self.conf.means_lr,
         )
         self.splat_optimizers['quats'] = torch.optim.Adam(
             params=[self.splats.quats],
-            lr=self.map_config.quat_lr,
+            lr=self.conf.quat_lr,
         )
         self.splat_optimizers['scales'] = torch.optim.Adam(
             params=[self.splats.scales],
-            lr=self.map_config.scale_lr,
+            lr=self.conf.scale_lr,
         )
         self.splat_optimizers['opacities'] = torch.optim.Adam(
             params=[self.splats.opacities],
-            lr=self.map_config.opacity_lr,
+            lr=self.conf.opacity_lr,
         )
         self.splat_optimizers['colors'] = torch.optim.Adam(
             params=[self.splats.colors],
-            lr=self.map_config.color_lr,
+            lr=self.conf.color_lr,
         )
         self.splat_optimizers['betas'] = torch.optim.Adam(
             params=[self.splats.betas],
-            lr=self.map_config.beta_lr,
+            lr=self.conf.beta_lr,
         )
         self.pose_optimizer = torch.optim.Adam(
             params=[torch.empty(0)],
@@ -206,10 +211,10 @@ class Backend(torch.multiprocessing.Process):
 
     def initialize(self, frame: Frame):
         self.logger.warning('Initializing')
-        frame = frame.to(self.map_config.device)
+        frame = frame.to(self.conf.device)
         self.keyframes = [frame]
 
-        self.splats = GaussianSplattingData.empty().to(self.map_config.device)
+        self.splats = GaussianSplattingData.empty().to(self.conf.device)
         self.initialize_optimizers()
 
         # f = frame.camera.intrinsics[0,0].item()
@@ -218,14 +223,8 @@ class Backend(torch.multiprocessing.Process):
             self.splats,
             self.splat_optimizers,
             None,
-            torch.ones_like(frame.img[..., 0], device=self.map_config.device).unsqueeze(
-                -1
-            ),
-            {
-                'depths': torch.ones(
-                    1, *frame.img.shape[:2], device=self.map_config.device
-                )
-            },
+            torch.ones_like(frame.img[..., 0], device=self.conf.device).unsqueeze(-1),
+            {'depths': torch.ones(1, *frame.img.shape[:2], device=self.conf.device)},
             frame,
             10000,
         )
@@ -252,12 +251,23 @@ class Backend(torch.multiprocessing.Process):
             N=5000,
         )
 
-        self.keyframes.append(frame)
+        new_frame = Frame(
+            img=frame.img.clone(),
+            timestamp=frame.timestamp,
+            camera=frame.camera.clone(),
+            pose=Pose(frame.pose()).to(self.conf.device),
+            gt_pose=frame.gt_pose,
+        )
+
+        self.keyframes.append(new_frame)
         self.pose_optimizer.add_param_group(
-            {'params': frame.pose.dt, 'lr': self.map_config.pose_optim_lr_translation}
+            {
+                'params': new_frame.pose.dt,
+                'lr': self.conf.pose_optim_lr_translation,
+            }
         )
         self.pose_optimizer.add_param_group(
-            {'params': frame.pose.dR, 'lr': self.map_config.pose_optim_lr_rotation}
+            {'params': new_frame.pose.dR, 'lr': self.conf.pose_optim_lr_rotation}
         )
 
     def run(self):

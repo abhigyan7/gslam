@@ -31,7 +31,7 @@ import numpy as np
 class TrackingConfig:
     device: str = 'cuda'
     num_tracking_iters: int = 100
-    photometric_loss: Literal['l1', 'mse'] = 'l1'
+    photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'l1'
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
 
@@ -95,6 +95,7 @@ class Frontend(mp.Process):
         self,
         gt_img: torch.Tensor,
         rendered_img: torch.Tensor,
+        betas: torch.Tensor = None,
     ) -> torch.Tensor:
         error = rendered_img - gt_img
         match self.conf.photometric_loss:
@@ -102,6 +103,8 @@ class Frontend(mp.Process):
                 return error.abs().mean()
             case 'mse':
                 return error.square().mean()
+            case 'active-nerf':
+                return (error * betas.pow(-1.0)).square().mean()
             case _:
                 assert_never(self.conf.photometric_loss)
 
