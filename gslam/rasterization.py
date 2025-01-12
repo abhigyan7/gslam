@@ -10,7 +10,6 @@ from gsplat.cuda._wrapper import (
     isect_offset_encode,
     isect_tiles,
     rasterize_to_pixels,
-    spherical_harmonics,
 )
 
 
@@ -28,7 +27,6 @@ def rasterization(
     far_plane: float = 1e10,
     radius_clip: float = 0.0,
     eps2d: float = 0.3,
-    sh_degree: Optional[int] = None,
     packed: bool = True,
     tile_size: int = 16,
     backgrounds: Optional[Tensor] = None,
@@ -52,13 +50,9 @@ def rasterization(
         to a batch of images in one go, by simplly providing the batched `viewmats` and `Ks`.
 
     .. note::
-        **Support N-D Features**: If `sh_degree` is None,
+        **Support N-D Features**:
         the `colors` is expected to be with shape [N, D] or [C, N, D], in which D is the channel of
         the features to be rendered. The computation is slow when D > 32 at the moment.
-        If `sh_degree` is set, the `colors` is expected to be the SH coefficients with
-        shape [N, K, 3] or [C, N, K, 3], where K is the number of SH bases. In this case, it is expected
-        that :math:`(\\textit{sh_degree} + 1) ^ 2 \\leq K`, where `sh_degree` controls the
-        activated bases in the SH coefficients.
 
     .. note::
         **Depth Rendering**: This function supports colors or/and depths via `render_mode`.
@@ -130,9 +124,6 @@ def rasterization(
         eps2d: An epsilon added to the egienvalues of projected 2D covariance matrices.
             This will prevents the projected GS to be too small. For example eps2d=0.3
             leads to minimal 3 pixel unit. Default is 0.3.
-        sh_degree: The SH degree to use, which can be smaller than the total
-            number of bands. If set, the `colors` should be [(C,) N, K, 3] SH coefficients,
-            else the `colors` should [(C,) N, D] post-activation color values. Default is None.
         packed: Whether to use packed mode which is more memory efficient but might or
             might not be as fast. Default is True.
         tile_size: The size of the tiles for rasterization. Default is 16.
@@ -155,6 +146,7 @@ def rasterization(
             and "fisheye". Default is "pinhole".
         covars: Optional covariance matrices of the Gaussians. If provided, the `quats` and
             `scales` will be ignored. [N, 3, 3], Default is None.
+        betas: Optional confidences (betas) for the Gaussians. [N,].
 
     Returns:
         A tuple:
@@ -214,20 +206,10 @@ def rasterization(
     assert Ks.shape == (C, 3, 3), Ks.shape
     assert render_mode in ["RGB", "D", "ED", "RGB+D", "RGB+ED"], render_mode
 
-    if sh_degree is None:
-        # treat colors as post-activation values, should be in shape [N, D] or [C, N, D]
-        assert (colors.dim() == 2 and colors.shape[0] == N) or (
-            colors.dim() == 3 and colors.shape[:2] == (C, N)
-        ), colors.shape
-    else:
-        # treat colors as SH coefficients, should be in shape [N, K, 3] or [C, N, K, 3]
-        # Allowing for activating partial SH bands
-        assert (
-            colors.dim() == 3 and colors.shape[0] == N and colors.shape[2] == 3
-        ) or (
-            colors.dim() == 4 and colors.shape[:2] == (C, N) and colors.shape[3] == 3
-        ), colors.shape
-        assert (sh_degree + 1) ** 2 <= colors.shape[-2], colors.shape
+    # treat colors as post-activation values, should be in shape [N, D] or [C, N, D]
+    assert (colors.dim() == 2 and colors.shape[0] == N) or (
+        colors.dim() == 3 and colors.shape[:2] == (C, N)
+    ), colors.shape
 
     # Project Gaussians to 2D. Directly pass in {quats, scales} is faster than precomputing covars.
     proj_results = fully_fused_projection(
@@ -285,47 +267,27 @@ def rasterization(
     )
 
     # Turn colors into [C, N, D] or [nnz, D] to pass into rasterize_to_pixels()
-    if sh_degree is None:
-        # Colors are post-activation values, with shape [N, D] or [C, N, D]
-        if packed:
-            if colors.dim() == 2:
-                # Turn [N, D] into [nnz, D]
-                colors = colors[gaussian_ids]
-            else:
-                # Turn [C, N, D] into [nnz, D]
-                colors = colors[camera_ids, gaussian_ids]
+    # Colors are post-activation values, with shape [N, D] or [C, N, D]
+    if packed:
+        if colors.dim() == 2:
+            # Turn [N, D] into [nnz, D]
+            colors = colors[gaussian_ids]
+            # Turn [N] into [nnz]
+            betas = betas[gaussian_ids]
         else:
-            if colors.dim() == 2:
-                # Turn [N, D] into [C, N, D]
-                colors = colors.expand(C, -1, -1)
-            else:
-                # colors is already [C, N, D]
-                pass
+            # Turn [C, N, D] into [nnz, D]
+            colors = colors[camera_ids, gaussian_ids]
+            # Turn [C, N] into [nnz]
+            betas = betas[camera_ids, gaussian_ids]
     else:
-        # Colors are SH coefficients, with shape [N, K, 3] or [C, N, K, 3]
-        camtoworlds = torch.inverse(viewmats)  # [C, 4, 4]
-        if packed:
-            dirs = means[gaussian_ids, :] - camtoworlds[camera_ids, :3, 3]  # [nnz, 3]
-            masks = radii > 0  # [nnz]
-            if colors.dim() == 3:
-                # Turn [N, K, 3] into [nnz, 3]
-                shs = colors[gaussian_ids, :, :]  # [nnz, K, 3]
-            else:
-                # Turn [C, N, K, 3] into [nnz, 3]
-                shs = colors[camera_ids, gaussian_ids, :, :]  # [nnz, K, 3]
-            colors = spherical_harmonics(sh_degree, dirs, shs, masks=masks)  # [nnz, 3]
+        if colors.dim() == 2:
+            # Turn [N, D] into [C, N, D]
+            colors = colors.expand(C, -1, -1)
+            # Turn [N] into [C, N]
+            betas = betas.expand(C, -1)
         else:
-            dirs = means[None, :, :] - camtoworlds[:, None, :3, 3]  # [C, N, 3]
-            masks = radii > 0  # [C, N]
-            if colors.dim() == 3:
-                # Turn [N, K, 3] into [C, N, K, 3]
-                shs = colors.expand(C, -1, -1, -1)  # [C, N, K, 3]
-            else:
-                # colors is already [C, N, K, 3]
-                shs = colors
-            colors = spherical_harmonics(sh_degree, dirs, shs, masks=masks)  # [C, N, 3]
-        # make it apple-to-apple with Inria's CUDA Backend.
-        colors = torch.clamp_min(colors + 0.5, 0.0)
+            # colors is already [C, N, D]
+            pass
 
     # Rasterize to pixels
     if render_mode in ["RGB+D", "RGB+ED"]:
@@ -334,12 +296,23 @@ def rasterization(
             backgrounds = torch.cat(
                 [backgrounds, torch.zeros(C, 1, device=backgrounds.device)], dim=-1
             )
+        depth_index = colors.shape[-1] - 1
     elif render_mode in ["D", "ED"]:
         colors = depths[..., None]
         if backgrounds is not None:
             backgrounds = torch.zeros(C, 1, device=backgrounds.device)
+        depth_index = colors.shape[-1] - 1
     else:  # RGB
         pass
+
+    if betas is not None:
+        betas = torch.exp(betas)
+        colors = torch.cat((colors, betas[..., None]), dim=-1)
+        if backgrounds is not None:
+            backgrounds = torch.cat(
+                [backgrounds, torch.zeros(C, 1, device=backgrounds.device)], dim=-1
+            )
+        betas_index = colors.shape[-1] - 1
 
     # Identify intersecting tiles
     tile_width = math.ceil(width / float(tile_size))
@@ -419,14 +392,16 @@ def rasterization(
             packed=packed,
             absgrad=absgrad,
         )
-    if render_mode in ["ED", "RGB+ED"]:
+    if render_mode in ["ED", "RGB+ED", "D", "RGB+D"]:
+        meta['depths'] = render_colors[..., depth_index]
+    if render_mode in ["ED", "RGB+ED", "ED"]:
         # normalize the accumulated depth to get the expected depth
-        render_colors = torch.cat(
-            [
-                render_colors[..., :-1],
-                render_colors[..., -1:] / render_alphas.clamp(min=1e-10),
-            ],
-            dim=-1,
-        )
+        meta['depths'] = (meta['depths'] / render_alphas.clamp(min=1e-10),)
+    if betas is not None:
+        meta['betas'] = render_colors[..., betas_index]
+    if render_mode not in ['D', 'ED']:
+        render_colors = render_colors[..., :3]
+    else:
+        render_colors = None
 
     return render_colors, render_alphas, meta

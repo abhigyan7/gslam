@@ -25,13 +25,15 @@ def knn(x: torch.Tensor, K: int = 4) -> torch.Tensor:
     return torch.from_numpy(distances).to(x)
 
 
-def torch_image_to_np(torch_img: torch.Tensor) -> np.ndarray:
+def torch_image_to_np(torch_img: torch.Tensor, minmax_norm: bool = False) -> np.ndarray:
     img = torch_img.detach().cpu().numpy()
+    if minmax_norm:
+        img = (img - img.min()) / (img.max() - img.min())
     img = np.uint8(img.clip(0.0, 1.0) * 255.0)
     return img
 
 
-def torch_to_pil(torch_img: torch.Tensor) -> Image:
+def torch_to_pil(torch_img: torch.Tensor, minmax_norm: bool = False) -> Image:
     img = torch_image_to_np(torch_img)
     return Image.fromarray(img)
 

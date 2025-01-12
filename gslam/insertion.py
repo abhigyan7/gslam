@@ -100,11 +100,13 @@ class InsertFromDepthMap(InsertionStrategy):
         no_depth_variance: float,
         min_alpha_for_depth: float,
         initial_opacity: float,
+        initial_beta: float,
     ):
         self.depth_variance = depth_variance
         self.no_depth_variance = no_depth_variance
         self.min_alpha_for_depth = min_alpha_for_depth
         self.initial_opacity = initial_opacity
+        self.initial_beta = initial_beta
 
     @torch.no_grad()
     def step(
@@ -117,8 +119,7 @@ class InsertFromDepthMap(InsertionStrategy):
         frame: Frame,
         N: int,
     ):
-        # depths = rendered_colors[..., -1] * frame.camera.intrinsics[0,0].item()
-        depths = rendered_colors[..., -1]
+        depths = meta['depths'][0, ...]
         device = depths.device
         valid_depth_region = torch.logical_and(
             rendered_alphas[..., 0] > self.min_alpha_for_depth, depths > 0
@@ -204,6 +205,7 @@ class InsertFromDepthMap(InsertionStrategy):
                 torch.full((N,), self.initial_opacity, device=device)
             ),
             'quats': torch.rand((N, 4), device=device),
+            'betas': torch.log(torch.full((N,), self.initial_beta, device=device)),
         }
 
         self._add_new_splats(splats, optimizers, new_params)

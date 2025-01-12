@@ -83,9 +83,12 @@ class Frontend(mp.Process):
         os.makedirs(self.output_dir / 'renders', exist_ok=True)
         os.makedirs(self.output_dir / 'alphas', exist_ok=True)
         os.makedirs(self.output_dir / 'depths', exist_ok=True)
+        os.makedirs(self.output_dir / 'betas', exist_ok=True)
 
     def to_insert_keyframe(self, iou, _oc, _new_frame):
         # TODO implement insertion on pose diffs
+        # TODO implement insertion on the last keyframe insertion
+        #      being too far away in time
         return iou < self.conf.kf_cov
 
     def tracking_loss(
@@ -139,11 +142,12 @@ class Frontend(mp.Process):
             )
 
         with torch.no_grad():
-            rendered_rgbd, _rendered_alpha, render_info = self.splats(
+            rendered_rgb, _rendered_alpha, render_info = self.splats(
                 [new_frame.camera], [new_frame.pose], render_depth=True
             )
-            rendered_rgb = rendered_rgbd[0, ..., :3]
-            rendered_depth = rendered_rgbd[0, ..., 3]
+            rendered_rgb = rendered_rgb[0]
+            rendered_depth = render_info['depths'][0]
+            rendered_beta = render_info['betas'][0]
 
             new_frame.visible_gaussians = render_info['radii'] > 0
 
@@ -211,6 +215,10 @@ class Frontend(mp.Process):
 
         torch_to_pil(rendered_depth).save(
             self.output_dir / f'depths/{len(self.frames):08}.jpg'
+        )
+
+        torch_to_pil(rendered_beta, minmax_norm=True).save(
+            self.output_dir / f'betas/{len(self.frames):08}.jpg'
         )
 
         self.frames.append(

@@ -31,6 +31,7 @@ class MapConfig:
     scale_lr: float = 0.005
     color_lr: float = 0.005
     quat_lr: float = 0.005
+    beta_lr: float = 0.005
 
     # background rgb
     background_color: Tuple[float, 3] = (0.0, 0.0, 0.0)
@@ -40,6 +41,7 @@ class MapConfig:
     initial_opacity: float = 0.9
     initial_scale: float = 1.0
     initial_extent: float = 1.0
+    initial_beta: float = 0.3
 
     device: str = 'cuda:0'
 
@@ -70,7 +72,7 @@ class Backend(torch.multiprocessing.Process):
         self.splats = GaussianSplattingData.empty()
         self.pruning = PruneLowOpacity(self.map_config.opacity_pruning_threshold)
         self.insertion_depth_map = InsertFromDepthMap(
-            0.2, 0.5, 0.1, self.map_config.initial_opacity
+            0.2, 0.5, 0.1, self.map_config.initial_opacity, self.map_config.initial_beta
         )
         self.insertion_3dgs = InsertUsingImagePlaneGradients(
             0.0002,
@@ -193,6 +195,10 @@ class Backend(torch.multiprocessing.Process):
             params=[self.splats.colors],
             lr=self.map_config.color_lr,
         )
+        self.splat_optimizers['betas'] = torch.optim.Adam(
+            params=[self.splats.betas],
+            lr=self.map_config.beta_lr,
+        )
         self.pose_optimizer = torch.optim.Adam(
             params=[torch.empty(0)],
             lr=0.001,
@@ -211,11 +217,15 @@ class Backend(torch.multiprocessing.Process):
         self.insertion_depth_map.step(
             self.splats,
             self.splat_optimizers,
-            torch.ones(*frame.img.shape[:2], 4, device=self.map_config.device),
+            None,
             torch.ones_like(frame.img[..., 0], device=self.map_config.device).unsqueeze(
                 -1
             ),
-            {},
+            {
+                'depths': torch.ones(
+                    1, *frame.img.shape[:2], device=self.map_config.device
+                )
+            },
             frame,
             10000,
         )
@@ -230,6 +240,7 @@ class Backend(torch.multiprocessing.Process):
             render_colors, _render_alphas, render_info = self.splats(
                 [frame.camera],
                 [frame.pose],
+                render_depth=True,
             )
         self.insertion_depth_map.step(
             self.splats,
