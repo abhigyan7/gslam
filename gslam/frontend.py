@@ -19,7 +19,6 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, Pose
-from .rasterization import RasterizerConfig
 from .trajectory import kabsch_umeyama, average_translation_error
 from .utils import get_projection_matrix, q_get, torch_image_to_np, torch_to_pil
 
@@ -44,7 +43,6 @@ class Frontend(mp.Process):
     def __init__(
         self,
         conf: TrackingConfig,
-        rasterizer_conf: RasterizerConfig,
         backend_queue: mp.Queue,
         frontend_queue: mp.Queue,
         sensor_queue: mp.Queue,
@@ -53,7 +51,6 @@ class Frontend(mp.Process):
     ):
         super().__init__()
         self.conf: TrackingConfig = conf
-        self.rasterizer_conf: RasterizerConfig = rasterizer_conf
         self.map_queue: mp.Queue = backend_queue
         self.queue: mp.Queue[int] = frontend_queue
         self.keyframes: List[Frame] = []

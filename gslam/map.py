@@ -1,12 +1,12 @@
 from typing import Dict, Self, Tuple
 
 import torch
-from gsplat.rendering import rasterization
 
 from .primitives import Camera, Pose
 from .utils import knn, create_batch
 
 from typing import List
+from .rasterization import rasterization
 
 
 # consider the implications of all these structs being torch modules

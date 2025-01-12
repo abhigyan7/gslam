@@ -3,7 +3,6 @@ from torch import multiprocessing as mp
 from gslam.backend import Backend, MapConfig
 from gslam.data import RGBSensorStream, TumRGB
 from gslam.frontend import Frontend, TrackingConfig
-from gslam.rasterization import RasterizerConfig
 
 import sys
 import gc
@@ -30,7 +29,6 @@ def main(seq_len: int = -1):
 
     frontend_process = Frontend(
         TrackingConfig(),
-        RasterizerConfig(),
         frontend_to_backend_queue,
         backend_to_frontend_queue,
         dataset_queue,
