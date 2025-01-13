@@ -84,12 +84,13 @@ class InsertionStrategy(ABC):
 
         covars, _precis = gsplat.quat_scale_to_covar_preci(
             ret['quats'],
-            ret['scales'],
+            torch.exp(ret['scales']),
         )
         noise = torch.randn_like(ret['means'])
         noise = torch.einsum("bij,bj->bi", covars, noise)
         ret['means'].add_(noise)
-        ret['opacities'].multiply_(1.0 / 1.6)
+        # scales *= 1/1.6 in log space
+        ret['scales'].add_(-torch.log(1.6))
         return ret
 
 
@@ -126,7 +127,6 @@ class InsertFromDepthMap(InsertionStrategy):
         )
 
         median_depth = depths[valid_depth_region].median()
-        print(f'{median_depth=}')
 
         random_depths = torch.randn_like(depths, device=device)
 
@@ -182,25 +182,19 @@ class InsertFromDepthMap(InsertionStrategy):
         means = means[picks]
         colors = colors[picks]
 
-        print(f"{means.mean()=}")
-
         if splats.scales.size().numel() > 0:
-            scales = splats.scales.mean(dim=0).tile([N, 1])
+            scales = torch.exp(splats.scales).mean(dim=0).tile([N, 1])
         else:
             print("Found no scales")
             avg_distance_to_nearest_3_neighbors = torch.sqrt(
                 knn(means, 4)[:, 1:] ** 2
             ).mean(dim=-1)
-            scales = (
-                torch.log(avg_distance_to_nearest_3_neighbors)
-                .unsqueeze(-1)
-                .repeat(1, 3)
-            )
+            scales = avg_distance_to_nearest_3_neighbors.unsqueeze(-1).repeat(1, 3)
 
         new_params = {
             'means': means,
-            'scales': scales,
-            'colors': colors,
+            'scales': torch.log(scales),
+            'colors': torch.logit(colors),
             'opacities': torch.logit(
                 torch.full((N,), self.initial_opacity, device=device)
             ),

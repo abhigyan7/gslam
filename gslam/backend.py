@@ -20,7 +20,7 @@ from .utils import create_batch
 class MapConfig:
     isotropic_regularization_weight: float = 10.0
     opacity_regularization_weight: float = 0.000005
-    betas_regularization_weight: float = 0.05
+    betas_regularization_weight: float = 1.0
 
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
@@ -49,7 +49,7 @@ class MapConfig:
     optim_window_last_n_keyframes: int = 5
     optim_window_random_keyframes: int = 5
 
-    num_iters_mapping: int = 200
+    num_iters_mapping: int = 400
 
     opacity_pruning_threshold: float = 0.6
 
@@ -120,8 +120,8 @@ class Backend(torch.multiprocessing.Process):
             # unsqueeze so that broadcast multiplication works out
             inv_betas = render_info['betas'].pow(-1.0).unsqueeze(-1)
             photometric_loss = ((render_colors - gt_imgs) * inv_betas).square().mean()
-            mean_scales = self.splats.scales.mean(dim=1, keepdim=True).detach()
-            isotropic_loss = (self.splats.scales - mean_scales).abs().mean()
+            mean_scales = self.splats.scales.mean(dim=1, keepdim=True).exp().detach()
+            isotropic_loss = (self.splats.scales.exp() - mean_scales).abs().mean()
             betas_loss = self.splats.betas.mean()
             opacity_loss = self.splats.opacities.mean()
             total_loss = (
@@ -146,7 +146,7 @@ class Backend(torch.multiprocessing.Process):
                     None,
                 )
 
-            desc = f"[Mapping] loss={total_loss.item():.3f}, n_splats={self.splats.means.shape[0]:07} opacmin={torch.sigmoid(self.splats.opacities).min():.2f}"
+            desc = f"[Mapping] loss={photometric_loss.item():.3f}, n_splats={self.splats.means.shape[0]:07}"
             pbar.set_description(desc)
 
             self.step_all_optimizers()

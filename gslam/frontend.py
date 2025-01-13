@@ -84,6 +84,7 @@ class Frontend(mp.Process):
         os.makedirs(self.output_dir / 'alphas', exist_ok=True)
         os.makedirs(self.output_dir / 'depths', exist_ok=True)
         os.makedirs(self.output_dir / 'betas', exist_ok=True)
+        os.makedirs(self.output_dir / 'renders_from_gtposes', exist_ok=True)
 
     def to_insert_keyframe(self, iou, _oc, _new_frame):
         # TODO implement insertion on pose diffs
@@ -273,14 +274,20 @@ class Frontend(mp.Process):
             '/tracking/pc',
             rr.Points3D(
                 positions=self.splats.means.detach().cpu().numpy(),
-                radii=self.splats.scales.min(dim=-1).values.detach().cpu().numpy()
+                radii=torch.exp(self.splats.scales)
+                .min(dim=-1)
+                .values.detach()
+                .cpu()
+                .numpy()
                 * 0.5,
-                colors=torch.cat(
-                    [
-                        self.splats.colors,
-                        torch.sigmoid(self.splats.opacities)[..., None],
-                    ],
-                    dim=1,
+                colors=torch.sigmoid(
+                    torch.cat(
+                        [
+                            self.splats.colors,
+                            self.splats.opacities[..., None],
+                        ],
+                        dim=1,
+                    )
                 )
                 .detach()
                 .cpu()
@@ -304,6 +311,22 @@ class Frontend(mp.Process):
                 ).compress(jpeg_quality=95),
             )
 
+        for i, kf in enumerate(self.frames):
+            rendered_rgb, _rendered_alpha, _render_info = self.splats(
+                [kf.camera],
+                [Pose(kf.gt_pose.to(self.conf.device)).to(self.conf.device)],
+            )
+            torch_to_pil(rendered_rgb[0]).save(
+                self.output_dir / f'renders_from_gtposes/{i:08}.jpg'
+            )
+
+            rr.log(
+                f'/tracking/pose_{i}/image',
+                rr.Image(
+                    torch_image_to_np(rendered_rgb[0]), color_model=rr.ColorModel.RGB
+                ).compress(jpeg_quality=95),
+            )
+
         os.system(
             f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final.mp4"}'
         )
@@ -312,6 +335,9 @@ class Frontend(mp.Process):
         )
         os.system(
             f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/renders/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"renders.mp4"}'
+        )
+        os.system(
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/renders_from_gtposes/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"renders_from_gtposes.mp4"}'
         )
 
     @torch.no_grad
