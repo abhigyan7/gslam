@@ -1,10 +1,14 @@
 from dataclasses import dataclass
 import logging
+import os
+from pathlib import Path
 import random
 import threading
 from copy import deepcopy
 from typing import List, Dict, Tuple
 
+import numpy as np
+import rerun as rr
 import torch
 import tqdm
 
@@ -40,7 +44,7 @@ class MapConfig:
     initialization_type: str = 'random'
     initial_number_of_gaussians: int = 10_000
     initial_opacity: float = 0.9
-    initial_scale: float = 1.0
+    initial_scale: float = 2.0
     initial_extent: float = 1.0
     initial_beta: float = 0.3
 
@@ -50,6 +54,7 @@ class MapConfig:
     optim_window_random_keyframes: int = 5
 
     num_iters_mapping: int = 400
+    num_iters_initialization: int = 1050
 
     opacity_pruning_threshold: float = 0.6
 
@@ -79,6 +84,11 @@ class Backend(torch.multiprocessing.Process):
             0.0002,
             0.01,
         )
+        self.initialized: bool = False
+
+        runs_dir = Path('runs')
+        self.output_dir = runs_dir / 'backend'
+        os.makedirs(self.output_dir, exist_ok=True)
 
     def optimization_window(self):
         window_size_total = (
@@ -105,7 +115,12 @@ class Backend(torch.multiprocessing.Process):
         return window
 
     def optimize_map(self):
-        for step in (pbar := tqdm.trange(self.conf.num_iters_mapping)):
+        n_iters = (
+            self.conf.num_iters_mapping
+            if self.initialized
+            else self.conf.num_iters_initialization
+        )
+        for step in (pbar := tqdm.trange(n_iters)):
             window = self.optimization_window()
             cameras = [x.camera for x in window]
             poses = torch.nn.ModuleList([x.pose for x in window])
@@ -119,6 +134,7 @@ class Backend(torch.multiprocessing.Process):
 
             # unsqueeze so that broadcast multiplication works out
             inv_betas = render_info['betas'].pow(-1.0).unsqueeze(-1)
+            inv_betas = 1.0
             photometric_loss = ((render_colors - gt_imgs) * inv_betas).square().mean()
             mean_scales = self.splats.scales.mean(dim=1, keepdim=True).exp().detach()
             isotropic_loss = (self.splats.scales.exp() - mean_scales).abs().mean()
@@ -146,7 +162,11 @@ class Backend(torch.multiprocessing.Process):
                     None,
                 )
 
-            desc = f"[Mapping] loss={photometric_loss.item():.3f}, n_splats={self.splats.means.shape[0]:07}"
+            desc = (
+                f"[Mapping] loss={photometric_loss.item():.3f}, "
+                f"n_splats={self.splats.means.shape[0]:07}, "
+                f"mean_beta={self.splats.betas.mean():.3f}"
+            )
             pbar.set_description(desc)
 
             self.step_all_optimizers()
@@ -163,7 +183,11 @@ class Backend(torch.multiprocessing.Process):
 
     def sync_with_frontend(self):
         self.frontend_queue.put(
-            (BackendMessage.SYNC, self.splats.clone(), deepcopy(self.keyframes)),
+            (
+                BackendMessage.SYNC,
+                self.splats.clone(),
+                deepcopy(self.keyframes),
+            )
         )
         return
 
@@ -217,21 +241,89 @@ class Backend(torch.multiprocessing.Process):
         self.splats = GaussianSplattingData.empty().to(self.conf.device)
         self.initialize_optimizers()
 
-        # f = frame.camera.intrinsics[0,0].item()
+        H, W, _ = frame.img.shape
+        mock_depth_map = torch.ones((1, H, W), device=self.conf.device)
+        mock_depth_map = (
+            mock_depth_map + (torch.randn_like(mock_depth_map) - 0.5) * 0.05
+        )
+        mock_depth_map *= self.conf.initial_scale
+        mock_alphas = torch.ones((1, H, W, 1), device=self.conf.device)
 
         self.insertion_depth_map.step(
             self.splats,
             self.splat_optimizers,
             None,
-            torch.ones_like(frame.img[..., 0], device=self.conf.device).unsqueeze(-1),
-            {'depths': torch.ones(1, *frame.img.shape[:2], device=self.conf.device)},
+            mock_alphas,
+            {'depths': mock_depth_map},
             frame,
             10000,
         )
 
         self.optimize_map()
-        self.queue.task_done()
         self.logger.warning('Initialized')
+        self.initialized = True
+
+        i = 0
+        f = frame
+        q, t = f.pose.to_qt()
+        q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
+        t = t.detach().cpu().numpy().reshape(-1)
+        rr.log(
+            f'/backend/pose_{i}',
+            rr.Pinhole(
+                resolution=[f.camera.width, f.camera.height],
+                focal_length=[
+                    f.camera.intrinsics[0, 0].item(),
+                    f.camera.intrinsics[1, 1].item(),
+                ],
+                principal_point=[
+                    f.camera.intrinsics[0, 2].item(),
+                    f.camera.intrinsics[1, 2].item(),
+                ],
+            ),
+        )
+        rr.log(
+            f'/backend/pose_{i}/depth',
+            rr.DepthImage(mock_depth_map[0].detach().cpu().numpy()),
+        )
+        rr.log(
+            f'/backend/pose_{i}/gt_depth',
+            rr.DepthImage(f.gt_depth.detach().cpu().numpy()),
+        )
+        rr.log(
+            f'/backend/pose_{i}',
+            rr.Transform3D(
+                rotation=rr.datatypes.Quaternion(xyzw=q),
+                translation=t,
+                from_parent=True,
+            ),
+            static=True,
+        )
+        rr.log(
+            f'/backend/pc_{i}',
+            rr.Points3D(
+                positions=self.splats.means.detach().cpu().numpy(),
+                radii=torch.exp(self.splats.scales)
+                .min(dim=-1)
+                .values.detach()
+                .cpu()
+                .numpy()
+                * 0.05,
+                colors=torch.sigmoid(
+                    torch.cat(
+                        [
+                            self.splats.colors,
+                            self.splats.opacities[..., None],
+                        ],
+                        dim=1,
+                    )
+                )
+                .detach()
+                .cpu()
+                .numpy(),
+            ),
+            static=True,
+        )
         return
 
     def add_keyframe(self, frame: Frame):
@@ -257,6 +349,7 @@ class Backend(torch.multiprocessing.Process):
             camera=frame.camera.clone(),
             pose=Pose(frame.pose()).to(self.conf.device),
             gt_pose=frame.gt_pose,
+            gt_depth=frame.gt_depth,
         )
 
         self.keyframes.append(new_frame)
@@ -267,10 +360,78 @@ class Backend(torch.multiprocessing.Process):
             }
         )
         self.pose_optimizer.add_param_group(
-            {'params': new_frame.pose.dR, 'lr': self.conf.pose_optim_lr_rotation}
+            {
+                'params': new_frame.pose.dR,
+                'lr': self.conf.pose_optim_lr_rotation,
+            }
+        )
+
+        i = len(self.keyframes)
+        f = new_frame
+        q, t = f.pose.to_qt()
+        q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
+        t = t.detach().cpu().numpy().reshape(-1)
+        rr.log(
+            f'/backend/pose_{i}',
+            rr.Pinhole(
+                resolution=[f.camera.width, f.camera.height],
+                focal_length=[
+                    f.camera.intrinsics[0, 0].item(),
+                    f.camera.intrinsics[1, 1].item(),
+                ],
+                principal_point=[
+                    f.camera.intrinsics[0, 2].item(),
+                    f.camera.intrinsics[1, 2].item(),
+                ],
+            ),
+        )
+        rr.log(
+            f'/backend/pose_{i}/depth',
+            rr.DepthImage(render_info['depths'][0].detach().cpu().numpy()),
+        )
+        rr.log(
+            f'/backend/pose_{i}/gt_depth',
+            rr.DepthImage(f.gt_depth.detach().cpu().numpy()),
+        )
+        rr.log(
+            f'/backend/pose_{i}',
+            rr.Transform3D(
+                rotation=rr.datatypes.Quaternion(xyzw=q),
+                translation=t,
+                from_parent=True,
+            ),
+            static=True,
+        )
+        rr.log(
+            f'/backend/pc_{i}',
+            rr.Points3D(
+                positions=self.splats.means.detach().cpu().numpy()[-5000:],
+                radii=torch.exp(self.splats.scales[-5000:])
+                .min(dim=-1)
+                .values.detach()
+                .cpu()
+                .numpy()
+                * 0.05,
+                colors=torch.sigmoid(
+                    torch.cat(
+                        [
+                            self.splats.colors[-5000:],
+                            self.splats.opacities[-5000:, ..., None],
+                        ],
+                        dim=1,
+                    )
+                )
+                .detach()
+                .cpu()
+                .numpy(),
+            ),
+            static=True,
         )
 
     def run(self):
+        rr.init('gslam', recording_id='gslam_1')
+        rr.save(self.output_dir / 'rr-be.rrd')
+        rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
         while True:
             if self.queue.empty():
                 continue

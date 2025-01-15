@@ -111,9 +111,10 @@ class Frontend(mp.Process):
 
     def track(self, new_frame: Frame):
         previous_keyframe = self.keyframes[-1]
+        previous_frame = self.frames[-1]
 
         # start with unit Rt difference?
-        new_frame.pose = Pose(previous_keyframe.pose()).to(self.conf.device)
+        new_frame.pose = Pose(previous_frame.pose()).to(self.conf.device)
 
         pose_optimizer = torch.optim.Adam(
             [
@@ -446,7 +447,7 @@ class Frontend(mp.Process):
     @rr.shutdown_at_exit
     def run(self):
         rr.init('gslam', recording_id='gslam_1')
-        rr.save(self.output_dir / 'rr.rrd')
+        rr.save(self.output_dir / 'rr-fe.rrd')
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
         self.Ks = get_projection_matrix().to(self.conf.device)

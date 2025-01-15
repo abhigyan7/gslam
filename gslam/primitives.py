@@ -209,8 +209,8 @@ class Camera:
         ).to(depth_map.device)
 
         # H, W
-        us = grid[..., 0]
-        vs = grid[..., 1]
+        us = grid[..., 1]
+        vs = grid[..., 0]
 
         # H, W
         xs = (us - cx) * (depth_map / fx)
@@ -230,6 +230,7 @@ class Frame:
     camera: Camera
     pose: Pose
     gt_pose: torch.Tensor
+    gt_depth: torch.Tensor = field(default=None)
     visible_gaussians: torch.Tensor = field(default=None)
 
     def to(self, device):
@@ -242,6 +243,7 @@ class Frame:
             visible_gaussians=self.visible_gaussians.to(device)
             if self.visible_gaussians is not None
             else None,
+            gt_depth=self.gt_depth.to(device) if self.gt_depth is not None else None,
         )
         return ret
 

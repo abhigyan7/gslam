@@ -1,4 +1,5 @@
 from abc import ABC
+import math
 
 from .map import GaussianSplattingData
 from .primitives import Frame
@@ -90,7 +91,7 @@ class InsertionStrategy(ABC):
         noise = torch.einsum("bij,bj->bi", covars, noise)
         ret['means'].add_(noise)
         # scales *= 1/1.6 in log space
-        ret['scales'].add_(-torch.log(1.6))
+        ret['scales'].add_(-math.log(1.6))
         return ret
 
 
@@ -121,9 +122,11 @@ class InsertFromDepthMap(InsertionStrategy):
         N: int,
     ):
         depths = meta['depths'][0, ...]
+        alphas = rendered_alphas[0, ..., 0]
+
         device = depths.device
         valid_depth_region = torch.logical_and(
-            rendered_alphas[..., 0] > self.min_alpha_for_depth, depths > 0
+            alphas > self.min_alpha_for_depth, depths > 0
         )
 
         median_depth = depths[valid_depth_region].median()
@@ -181,6 +184,11 @@ class InsertFromDepthMap(InsertionStrategy):
         colors = frame.img.reshape([-1, 3])
         means = means[picks]
         colors = colors[picks]
+
+        c2w = torch.linalg.inv(frame.pose())
+        R = c2w[:3, :3]
+        t = c2w[:3, 3]
+        means = means @ R.t() + t
 
         if splats.scales.size().numel() > 0:
             scales = torch.exp(splats.scales).mean(dim=0).tile([N, 1])

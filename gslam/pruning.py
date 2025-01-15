@@ -17,6 +17,7 @@ class PruningStrategy(ABC):
         splats: GaussianSplattingData,
         optimizers: Dict[str, Optimizer],
         keep_mask: torch.Tensor,
+        *per_gaussian_params: Dict[str, torch.Tensor],
     ):
         if (1.0 - keep_mask.float()).sum() < 1:
             return 0
@@ -45,6 +46,11 @@ class PruningStrategy(ABC):
                 optimizer.param_groups[i]['params'] = [new_splat_param]
             splats.__setattr__(splat_param_name, new_splat_param)
 
+        for splat_param_name in per_gaussian_params:
+            per_gaussian_params[splat_param_name] = per_gaussian_params[
+                splat_param_name
+            ][keep_mask]
+
         return n_pruned
 
 
@@ -72,4 +78,21 @@ class PruneByVisibility(PruningStrategy):
         optimizers: Dict[str, Optimizer],
         visibility_counts: torch.Tensor,
     ):
-        return
+        raise NotImplementedError()
+
+
+class PruneLargeGaussians(PruningStrategy):
+    '''Prune gaussians which have a large screen-space footprint'''
+
+    def __init__(self, min_radius: float):
+        self.min_radius = min_radius
+
+    @torch.no_grad()
+    def step(
+        self,
+        splats: GaussianSplattingData,
+        optimizers: Dict[str, Optimizer],
+        radii: torch.Tensor,
+    ):
+        keep_mask = radii > self.min_radius
+        return self._prune_using_mask(splats, optimizers, keep_mask)

@@ -18,6 +18,10 @@ class TumRGB:
         self.rgb_frame_timestamps = rgb_frames[:, 0].astype(np.float64)
         self.rgb_frame_filenames = rgb_frames[:, 1].astype(np.str_)
 
+        depth_frames = np.loadtxt(self.sequence_dir / "depth.txt", np.str_)
+        self.depth_frame_timestamps = depth_frames[:, 0].astype(np.float64)
+        self.depth_frame_filenames = depth_frames[:, 1].astype(np.str_)
+
         self.num_frames = len(self.rgb_frame_filenames)
 
         ground_truth = np.loadtxt(self.sequence_dir / "groundtruth.txt", np.str_)
@@ -55,11 +59,16 @@ class TumRGB:
     def __getitem__(self, idx):
         if idx >= len(self):
             raise StopIteration
-        filename = self.sequence_dir / self.rgb_frame_filenames[idx]
-        image = np.asarray(Image.open(filename))
+        rgb_filename = self.sequence_dir / self.rgb_frame_filenames[idx]
+        image = np.asarray(Image.open(rgb_filename))
         image = np.float32(image) / 255.0
         image = torch.Tensor(image).cuda()
         height, width, _channels = image.shape
+
+        depth_filename = self.sequence_dir / self.depth_frame_filenames[idx]
+        depth_image = np.asarray(Image.open(depth_filename))
+        depth_image = torch.Tensor(depth_image.copy()).cuda() / 5000.0
+
         gt_pose = torch.Tensor(self.poses[idx, ...])
         ts = self.rgb_frame_timestamps[idx]
         Ks = torch.FloatTensor(
@@ -70,7 +79,7 @@ class TumRGB:
             ]
         ).cuda()
         camera = Camera(Ks, height, width)
-        frame = Frame(image, ts, camera, Pose(), gt_pose)
+        frame = Frame(image, ts, camera, Pose(), gt_pose, depth_image)
         return frame
 
 
