@@ -59,7 +59,6 @@ class InsertionStrategy(ABC):
                 optimizer.state[new_splat_param] = param_state
                 optimizer.param_groups[i]['params'] = [new_splat_param]
             splats.__setattr__(splat_param_name, new_splat_param)
-        print(f"Added {N} new gaussians.")
         return N
 
     @torch.no_grad()

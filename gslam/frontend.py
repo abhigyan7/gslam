@@ -259,14 +259,12 @@ class Frontend(mp.Process):
         self.map_queue.put([FrontendMessage.REQUEST_INITIALIZE, deepcopy(frame)])
 
     def add_keyframe(self, frame: Frame):
-        print('adding kf!')
         assert self.initialized
         self.frozen_keyframes.append(frame)
         self.map_queue.put([FrontendMessage.ADD_KEYFRAME, deepcopy(frame)])
         self.waiting_for_sync = True
 
     def sync_maps(self, splats, keyframes):
-        self.logger.warning('Map synced')
         self.splats, self.keyframes = splats, keyframes
         return
 

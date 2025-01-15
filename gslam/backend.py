@@ -138,20 +138,20 @@ class Backend(torch.multiprocessing.Process):
             photometric_loss = ((render_colors - gt_imgs) * inv_betas).square().mean()
             mean_scales = self.splats.scales.mean(dim=1, keepdim=True).exp().detach()
             isotropic_loss = (self.splats.scales.exp() - mean_scales).abs().mean()
-            betas_loss = self.splats.betas.mean()
-            opacity_loss = self.splats.opacities.mean()
+            # betas_loss = self.splats.betas.mean()
+            opacity_loss = self.splats.opacities[render_info["radii"][0] > 0].mean()
             total_loss = (
                 photometric_loss
                 + self.conf.isotropic_regularization_weight * isotropic_loss
                 + self.conf.opacity_regularization_weight * opacity_loss
-                + self.conf.betas_regularization_weight * betas_loss
+                # + self.conf.betas_regularization_weight * betas_loss
             )
 
             render_info['means2d'].retain_grad()
 
             total_loss.backward()
 
-            if step == (self.conf.num_iters_mapping // 2):
+            if (step % 10) == 0:
                 self.insertion_3dgs.step(
                     self.splats,
                     self.splat_optimizers,
@@ -333,6 +333,7 @@ class Backend(torch.multiprocessing.Process):
                 [frame.pose],
                 render_depth=True,
             )
+        render_info['depths'] *= self.conf.initial_scale
         self.insertion_depth_map.step(
             self.splats,
             self.splat_optimizers,

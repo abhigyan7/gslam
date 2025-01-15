@@ -51,7 +51,7 @@ class TumRGB:
 
         self.length = self.num_frames
         if seq_len > 0:
-            self.length = seq_len
+            self.length = min(self.num_frames, seq_len)
 
     def __len__(self):
         return self.length
