@@ -30,7 +30,7 @@ import numpy as np
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 100
+    num_tracking_iters: int = 50
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'l1'
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
@@ -90,6 +90,7 @@ class Frontend(mp.Process):
         # TODO implement insertion on pose diffs
         # TODO implement insertion on the last keyframe insertion
         #      being too far away in time
+        # TODO implement insertion on visibility criterion like they do in MonoGS
         return iou < self.conf.kf_cov
 
     def tracking_loss(

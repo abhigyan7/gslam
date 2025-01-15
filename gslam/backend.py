@@ -53,7 +53,7 @@ class MapConfig:
     optim_window_last_n_keyframes: int = 5
     optim_window_random_keyframes: int = 5
 
-    num_iters_mapping: int = 400
+    num_iters_mapping: int = 150
     num_iters_initialization: int = 1050
 
     opacity_pruning_threshold: float = 0.6

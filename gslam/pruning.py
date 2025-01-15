@@ -95,6 +95,6 @@ class PruneLargeGaussians(PruningStrategy):
         radii: torch.Tensor,
     ):
         # using max because logical_or can't reduce along an axis
-        keep_mask = torch.max(radii < self.min_radius, axis=0).values
+        keep_mask = torch.min(radii < self.min_radius, axis=0).values
         n_pruned = self._prune_using_mask(splats, optimizers, keep_mask)
         return n_pruned
