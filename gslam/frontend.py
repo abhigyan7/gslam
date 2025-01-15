@@ -35,7 +35,7 @@ class TrackingConfig:
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
 
-    kf_cov = 0.90
+    kf_cov = 0.80
     kf_oc = 0.4
 
 

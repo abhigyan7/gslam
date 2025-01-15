@@ -19,7 +19,7 @@ class PruningStrategy(ABC):
         keep_mask: torch.Tensor,
         *per_gaussian_params: Dict[str, torch.Tensor],
     ):
-        if (1.0 - keep_mask.float()).sum() < 1:
+        if keep_mask.sum() == 0:
             return 0
         n_pruned = keep_mask.shape[0] - keep_mask.sum()
 
@@ -94,5 +94,7 @@ class PruneLargeGaussians(PruningStrategy):
         optimizers: Dict[str, Optimizer],
         radii: torch.Tensor,
     ):
-        keep_mask = radii > self.min_radius
-        return self._prune_using_mask(splats, optimizers, keep_mask)
+        # using max because logical_or can't reduce along an axis
+        keep_mask = torch.max(radii < self.min_radius, axis=0).values
+        n_pruned = self._prune_using_mask(splats, optimizers, keep_mask)
+        return n_pruned

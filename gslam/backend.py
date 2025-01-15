@@ -15,7 +15,7 @@ import tqdm
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, Pose
-from .pruning import PruneLowOpacity
+from .pruning import PruneLowOpacity, PruneLargeGaussians
 from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
 from .utils import create_batch
 
@@ -57,6 +57,7 @@ class MapConfig:
     num_iters_initialization: int = 1050
 
     opacity_pruning_threshold: float = 0.6
+    size_pruning_threshold: int = 256
 
 
 class Backend(torch.multiprocessing.Process):
@@ -76,7 +77,8 @@ class Backend(torch.multiprocessing.Process):
         self.keyframes: List[Frame] = []
         self.backend_done_event = backend_done_event
         self.splats = GaussianSplattingData.empty()
-        self.pruning = PruneLowOpacity(self.conf.opacity_pruning_threshold)
+        self.pruning_opacity = PruneLowOpacity(self.conf.opacity_pruning_threshold)
+        self.pruning_size = PruneLargeGaussians(self.conf.size_pruning_threshold)
         self.insertion_depth_map = InsertFromDepthMap(
             0.2, 0.5, 0.1, self.conf.initial_opacity, self.conf.initial_beta
         )
@@ -136,10 +138,19 @@ class Backend(torch.multiprocessing.Process):
             inv_betas = render_info['betas'].pow(-1.0).unsqueeze(-1)
             inv_betas = 1.0
             photometric_loss = ((render_colors - gt_imgs) * inv_betas).square().mean()
-            mean_scales = self.splats.scales.mean(dim=1, keepdim=True).exp().detach()
-            isotropic_loss = (self.splats.scales.exp() - mean_scales).abs().mean()
+
+            visible_gaussians = render_info['radii'].sum(dim=0) > 0
+            mean_scales = (
+                self.splats.scales[visible_gaussians]
+                .mean(dim=1, keepdim=True)
+                .exp()
+                .detach()
+            )
+            isotropic_loss = (
+                (self.splats.scales.exp()[visible_gaussians] - mean_scales).abs().mean()
+            )
             # betas_loss = self.splats.betas.mean()
-            opacity_loss = self.splats.opacities[render_info["radii"][0] > 0].mean()
+            opacity_loss = self.splats.opacities[visible_gaussians].mean()
             total_loss = (
                 photometric_loss
                 + self.conf.isotropic_regularization_weight * isotropic_loss
@@ -171,7 +182,10 @@ class Backend(torch.multiprocessing.Process):
 
             self.step_all_optimizers()
 
-            self.pruning.step(self.splats, self.splat_optimizers)
+            self.pruning_size.step(
+                self.splats, self.splat_optimizers, render_info['radii']
+            )
+            self.pruning_opacity.step(self.splats, self.splat_optimizers)
 
         render_colors, _render_alphas, render_info = self.splats(
             [self.keyframes[-1].camera],

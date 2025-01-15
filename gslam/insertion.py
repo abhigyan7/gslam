@@ -265,6 +265,20 @@ class InsertUsingImagePlaneGradients(InsertionStrategy):
         if num_split > 0:
             self._add_new_splats(splats, optimizers, split_splats)
 
+        meta['radii'] = torch.cat(
+            [
+                meta['radii'],
+                torch.zeros(
+                    [
+                        meta['radii'].shape[0],
+                        num_duplicate + num_split,
+                    ],
+                    device=meta['radii'].device,
+                ),
+            ],
+            dim=1,
+        )
+
         return num_duplicate, num_split
 
 
