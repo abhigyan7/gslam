@@ -1,31 +1,45 @@
 from torch import multiprocessing as mp
+import tyro
 
 from gslam.backend import Backend, MapConfig
 from gslam.data import RGBSensorStream, TumRGB
 from gslam.frontend import Frontend, TrackingConfig
 
+from dataclasses import dataclass, field
+from datetime import datetime
+import os
+from pathlib import Path
 import sys
-import gc
 
 
-# @rr.shutdown_at_exit
-def main(seq_len: int = -1):
-    tum_dataset = TumRGB('../../datasets/tum/rgbd_dataset_freiburg1_xyz', seq_len)
+@dataclass
+class PipelineConfig:
+    scene: Path
+    m: MapConfig = field(default_factory=lambda: MapConfig())
+    t: TrackingConfig = field(default_factory=lambda: TrackingConfig())
+    seq_len: int = -1
+
+
+def main(conf: PipelineConfig):
+    tum_dataset = TumRGB(conf.scene, conf.seq_len)
 
     dataset_queue = mp.JoinableQueue()
     frontend_to_backend_queue = mp.JoinableQueue()
     backend_to_frontend_queue = mp.JoinableQueue()
 
-    # rr.init('gslam', recording_id='gslam_1')
-    # rr.save('runs/rr.rrd')
-
     frontend_done_event = mp.Event()
     backend_done_event = mp.Event()
 
-    gc.collect()
     sensor_stream_process = RGBSensorStream(
         tum_dataset, dataset_queue, frontend_done_event
     )
+
+    runs_dir = Path('runs')
+    output_dir = runs_dir / datetime.now().strftime('%Y-%m-%d--%H-%M-%S')
+    os.makedirs(output_dir, exist_ok=True)
+
+    with open(output_dir / 'args.txt', 'w') as f:
+        f.write(' '.join(sys.argv))
 
     frontend_process = Frontend(
         TrackingConfig(),
@@ -34,6 +48,7 @@ def main(seq_len: int = -1):
         dataset_queue,
         frontend_done_event,
         backend_done_event,
+        output_dir,
     )
 
     backend_process = Backend(
@@ -54,7 +69,5 @@ def main(seq_len: int = -1):
 
 if __name__ == '__main__':
     mp.set_start_method('spawn')
-    seq_len = -1
-    if len(sys.argv) > 1:
-        seq_len = int(sys.argv[1])
-    main(seq_len)
+    conf = tyro.cli(PipelineConfig)
+    main(conf)

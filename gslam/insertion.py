@@ -128,6 +128,14 @@ class InsertFromDepthMap(InsertionStrategy):
             alphas > self.min_alpha_for_depth, depths > 0
         )
 
+        invalid_depth_region = torch.logical_not(valid_depth_region)
+        if invalid_depth_region.sum() < N:
+            n_invalid_depth_splats = invalid_depth_region.sum()
+            n_valid_depth_splats = N - n_invalid_depth_splats
+        else:
+            n_invalid_depth_splats = N
+            n_valid_depth_splats = 0
+
         median_depth = depths[valid_depth_region].median()
 
         random_depths = torch.randn_like(depths, device=device)
@@ -148,27 +156,27 @@ class InsertFromDepthMap(InsertionStrategy):
         )
         picks = []
 
-        if pixel_indices_where_depth_is_not_valid.shape[0] > 0:
+        if n_invalid_depth_splats > 0:
             picks.append(
                 (
                     pixel_indices_where_depth_is_not_valid[
                         torch.randint(
                             pixel_indices_where_depth_is_not_valid.shape[0],
                             [
-                                N,
+                                n_invalid_depth_splats,
                             ],
                         )
                     ]
                 ).reshape(-1),
             )
-        if pixel_indices_where_depth_is_valid.shape[0] > 0:
+        if n_valid_depth_splats > 0:
             picks.append(
                 (
                     pixel_indices_where_depth_is_valid[
                         torch.randint(
                             pixel_indices_where_depth_is_valid.shape[0],
                             [
-                                N,
+                                n_valid_depth_splats,
                             ],
                         )
                     ]

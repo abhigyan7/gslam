@@ -1,6 +1,5 @@
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
 import logging
 import os
 from pathlib import Path
@@ -35,7 +34,7 @@ class TrackingConfig:
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
 
-    kf_cov = 0.80
+    kf_cov = 0.9
     kf_oc = 0.4
 
 
@@ -48,6 +47,7 @@ class Frontend(mp.Process):
         sensor_queue: mp.Queue,
         frontend_done_event: Event = None,
         backend_done_event: Event = None,
+        output_dir: Path = None,
     ):
         super().__init__()
         self.conf: TrackingConfig = conf
@@ -75,16 +75,14 @@ class Frontend(mp.Process):
         self.frontend_done_event = frontend_done_event
         self.backend_done_event = backend_done_event
 
-        runs_dir = Path('runs')
-        self.output_dir = runs_dir / datetime.now().strftime('%Y-%m-%d--%H-%M-%S')
-
+        self.output_dir = output_dir
         os.makedirs(self.output_dir / 'final', exist_ok=True)
         os.makedirs(self.output_dir / 'gt', exist_ok=True)
         os.makedirs(self.output_dir / 'renders', exist_ok=True)
         os.makedirs(self.output_dir / 'alphas', exist_ok=True)
         os.makedirs(self.output_dir / 'depths', exist_ok=True)
         os.makedirs(self.output_dir / 'betas', exist_ok=True)
-        os.makedirs(self.output_dir / 'renders_from_gtposes', exist_ok=True)
+        os.makedirs(self.output_dir / 'final_renders', exist_ok=True)
 
     def to_insert_keyframe(self, iou, _oc, _new_frame):
         # TODO implement insertion on pose diffs
@@ -255,7 +253,6 @@ class Frontend(mp.Process):
             )
         )
         self.frozen_keyframes.append(frame)
-        self.logger.warning('Requested initialization.')
         assert not self.initialized
         self.map_queue.put([FrontendMessage.REQUEST_INITIALIZE, deepcopy(frame)])
 
@@ -314,17 +311,10 @@ class Frontend(mp.Process):
         for i, kf in enumerate(self.frames):
             rendered_rgb, _rendered_alpha, _render_info = self.splats(
                 [kf.camera],
-                [Pose(kf.gt_pose.to(self.conf.device)).to(self.conf.device)],
+                [kf.pose],
             )
             torch_to_pil(rendered_rgb[0]).save(
-                self.output_dir / f'renders_from_gtposes/{i:08}.jpg'
-            )
-
-            rr.log(
-                f'/tracking/pose_{i}/image',
-                rr.Image(
-                    torch_image_to_np(rendered_rgb[0]), color_model=rr.ColorModel.RGB
-                ).compress(jpeg_quality=95),
+                self.output_dir / f'final_renders/{i:08}.jpg'
             )
 
         os.system(
@@ -337,7 +327,7 @@ class Frontend(mp.Process):
             f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/renders/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"renders.mp4"}'
         )
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/renders_from_gtposes/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"renders_from_gtposes.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_renders/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final_renders.mp4"}'
         )
 
     @torch.no_grad
@@ -411,6 +401,9 @@ class Frontend(mp.Process):
         ate = average_translation_error(gt_ts, ts)
         print(f'{ate=}')
 
+        with open(self.output_dir / 'ate.txt', 'w') as f:
+            f.write(f'{ate=}')
+
         for i, f in enumerate(self.frames):
             q, t = f.pose.to_qt()
             q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
@@ -450,8 +443,6 @@ class Frontend(mp.Process):
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
         self.Ks = get_projection_matrix().to(self.conf.device)
-
-        self.logger.warning("test")
 
         self.waiting_for_sync = False
 
