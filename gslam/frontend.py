@@ -19,7 +19,13 @@ from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, Pose
 from .trajectory import kabsch_umeyama, average_translation_error
-from .utils import get_projection_matrix, q_get, torch_image_to_np, torch_to_pil
+from .utils import (
+    get_projection_matrix,
+    q_get,
+    torch_image_to_np,
+    torch_to_pil,
+    false_colormap,
+)
 
 
 import matplotlib.pyplot as plt
@@ -104,7 +110,7 @@ class Frontend(mp.Process):
             case 'mse':
                 return error.square().mean()
             case 'active-nerf':
-                return (error * betas.pow(-1.0)).square().mean()
+                return (error * betas.pow(-1.0).unsqueeze(-1)).square().mean()
             case _:
                 assert_never(self.conf.photometric_loss)
 
@@ -130,7 +136,8 @@ class Frontend(mp.Process):
             outputs = self.splats([new_frame.camera], [new_frame.pose])
 
             rendered_rgb = outputs.rgbs[0]
-            loss = self.tracking_loss(rendered_rgb, new_frame.img)
+            betas = outputs.betas[0]
+            loss = self.tracking_loss(rendered_rgb, new_frame.img, betas)
             loss.backward()
             pose_optimizer.step()
 
@@ -196,15 +203,15 @@ class Frontend(mp.Process):
             self.output_dir / f'gt/{len(self.frames):08}.jpg'
         )
 
-        torch_to_pil(outputs.alphas[0, ..., 0]).save(
+        false_colormap(outputs.alphas[0, ..., 0]).save(
             self.output_dir / f'alphas/{len(self.frames):08}.jpg'
         )
 
-        torch_to_pil(rendered_depth).save(
+        false_colormap(rendered_depth).save(
             self.output_dir / f'depths/{len(self.frames):08}.jpg'
         )
 
-        torch_to_pil(rendered_beta, minmax_norm=True).save(
+        false_colormap(rendered_beta).save(
             self.output_dir / f'betas/{len(self.frames):08}.jpg'
         )
 

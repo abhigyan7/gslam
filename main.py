@@ -42,7 +42,7 @@ def main(conf: PipelineConfig):
         f.write(' '.join(sys.argv))
 
     frontend_process = Frontend(
-        TrackingConfig(),
+        conf.t,
         frontend_to_backend_queue,
         backend_to_frontend_queue,
         dataset_queue,
@@ -52,7 +52,7 @@ def main(conf: PipelineConfig):
     )
 
     backend_process = Backend(
-        MapConfig(),
+        conf.m,
         frontend_to_backend_queue,
         backend_to_frontend_queue,
         backend_done_event,

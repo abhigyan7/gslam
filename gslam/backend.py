@@ -5,6 +5,7 @@ import threading
 from copy import deepcopy
 from typing import Dict, List
 
+from fused_ssim import fused_ssim
 import torch
 import tqdm
 
@@ -58,6 +59,10 @@ class MapConfig:
 
     reset_opacity: bool = False
     opacity_after_reset: float = 0.5
+
+    # used in the final optimization
+    ssim_weight: float = 0.2  # in [0,1]
+    num_iters_final: int = 2000
 
 
 def total_variation_loss(img: torch.Tensor) -> torch.Tensor:
@@ -162,12 +167,18 @@ class Backend(torch.multiprocessing.Process):
             betas_loss = self.splats.betas[visible_gaussians].mean()
             opacity_loss = self.splats.opacities[visible_gaussians].mean()
             depth_loss = total_variation_loss(outputs.depthmaps)
+            ssim_loss = 1.0 - fused_ssim(
+                outputs.rgbs.permute(0, 3, 1, 2),
+                gt_imgs.permute(0, 3, 1, 2),
+                padding='valid',
+            )
             total_loss = (
                 photometric_loss
                 + self.conf.isotropic_regularization_weight * isotropic_loss
                 + self.conf.opacity_regularization_weight * opacity_loss
                 + self.conf.betas_regularization_weight * betas_loss
                 + self.conf.depth_regularization_weight * depth_loss
+                + self.conf.ssim_weight * ssim_loss
             )
 
             outputs.means2d.retain_grad()
@@ -186,7 +197,7 @@ class Backend(torch.multiprocessing.Process):
             desc = (
                 f"[Mapping] loss={photometric_loss.item():.3f}, "
                 f"n_splats={self.splats.means.shape[0]:07}, "
-                f"mean_beta={self.splats.betas.mean():.3f}"
+                f"mean_beta={self.splats.betas.exp().mean().item():.3f}"
             )
             pbar.set_description(desc)
 
@@ -210,7 +221,7 @@ class Backend(torch.multiprocessing.Process):
         return
 
     def optimize_final(self):
-        n_iters = self.conf.num_iters_initialization
+        n_iters = self.conf.num_iters_final
 
         with torch.no_grad():
             # reset opacities. not sure if no_grad is needed here.
@@ -230,7 +241,16 @@ class Backend(torch.multiprocessing.Process):
                 poses,
             )
 
-            loss = (outputs.rgbs - gt_imgs).square().mean()
+            photometric_loss = (outputs.rgbs - gt_imgs).square().mean()
+            ssim_loss = 1.0 - fused_ssim(
+                outputs.rgbs.permute(0, 3, 1, 2),
+                gt_imgs.permute(0, 3, 1, 2),
+                padding='valid',
+            )
+            loss = (
+                self.conf.ssim_weight * ssim_loss
+                + (1.0 - self.conf.ssim_weight) * photometric_loss
+            )
             loss.backward()
 
             if ((step + 1) % (n_iters // 3)) == 0:

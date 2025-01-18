@@ -1,5 +1,6 @@
 from multiprocessing import Queue
 
+from matplotlib import colormaps
 import numpy as np
 import torch
 from PIL import Image
@@ -67,3 +68,16 @@ def unvmap(func: Callable[[torch.Tensor], torch.Tensor]):
         return ret.squeeze(0)
 
     return wrapper
+
+
+@torch.no_grad()
+def false_colormap(image: torch.Tensor) -> Image:
+    '''image in (H,W)'''
+    image = (image - image.min()) / (image.max() - image.min() + 1e-10)
+    image = torch.nan_to_num(image, 0.0)
+    image = image.clip(0.0, 1.0)
+    image = (image * 255.0).long()
+    image = torch.tensor(colormaps['turbo'].colors, device=image.device)[image]
+    image = image * 255.0
+    image = image.detach().cpu().numpy().astype(np.uint8)
+    return Image.fromarray(image)
