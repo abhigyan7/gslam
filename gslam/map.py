@@ -1,4 +1,4 @@
-from typing import Dict, Self, Tuple
+from typing import Self
 
 import torch
 
@@ -6,7 +6,7 @@ from .primitives import Camera, Pose
 from .utils import create_batch
 
 from typing import List
-from .rasterization import rasterization
+from .rasterization import rasterization, RasterizationOutput
 
 
 # consider the implications of all these structs being torch modules
@@ -35,13 +35,13 @@ class GaussianSplattingData(torch.nn.Module):
         cameras: List[Camera],
         poses: List[Pose],
         render_depth: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
+    ) -> RasterizationOutput:
         render_mode = 'RGB+D' if render_depth else 'RGB'
 
         Ks = create_batch(cameras, lambda x: x.intrinsics)
         viewmats = create_batch(poses, lambda x: x())
 
-        rendered_rgb, rendered_alpha, render_info = rasterization(
+        return rasterization(
             means=self.means,
             quats=self.quats,
             log_scales=self.scales,
@@ -55,7 +55,6 @@ class GaussianSplattingData(torch.nn.Module):
             packed=False,
             log_betas=self.betas,
         )
-        return rendered_rgb, rendered_alpha, render_info
 
     @staticmethod
     def empty(device: str = 'cuda') -> Self:

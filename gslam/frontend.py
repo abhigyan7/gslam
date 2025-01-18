@@ -127,11 +127,9 @@ class Frontend(mp.Process):
 
         for i in (pbar := tqdm.trange(self.conf.num_tracking_iters)):
             pose_optimizer.zero_grad()
-            rendered_rgb, _rendered_alpha, render_info = self.splats(
-                [new_frame.camera], [new_frame.pose]
-            )
+            outputs = self.splats([new_frame.camera], [new_frame.pose])
 
-            rendered_rgb = rendered_rgb[0]
+            rendered_rgb = outputs.rgbs[0]
             loss = self.tracking_loss(rendered_rgb, new_frame.img)
             loss.backward()
             pose_optimizer.step()
@@ -146,14 +144,14 @@ class Frontend(mp.Process):
             )
 
         with torch.no_grad():
-            rendered_rgb, _rendered_alpha, render_info = self.splats(
+            outputs = self.splats(
                 [new_frame.camera], [new_frame.pose], render_depth=True
             )
-            rendered_rgb = rendered_rgb[0]
-            rendered_depth = render_info['depths'][0]
-            rendered_beta = render_info['betas'][0]
+            rendered_rgb = outputs.rgbs[0]
+            rendered_depth = outputs.depths[0]
+            rendered_beta = outputs.betas[0]
 
-            new_frame.visible_gaussians = render_info['radii'] > 0
+            new_frame.visible_gaussians = outputs.radii > 0
 
             n_visible_gaussians = new_frame.visible_gaussians.sum()
             n_visible_gaussians_last_kf = previous_keyframe.visible_gaussians.sum()
@@ -169,21 +167,6 @@ class Frontend(mp.Process):
             oc = intersection.sum() / (
                 min(n_visible_gaussians.sum().item(), n_visible_gaussians_last_kf.sum())
             )
-
-        # rr.log(
-        #     '/tracking/rendered_rgb',
-        #     rr.Image(torch_image_to_np(rendered_rgb)).compress(95),
-        # )
-
-        # rr.log(
-        #     '/tracking/rendered_depth',
-        #     rr.Image(torch_image_to_np(rendered_depth)).compress(95),
-        # )
-
-        # rr.log(
-        #     '/tracking/gt_rgb',
-        #     rr.Image(torch_image_to_np(new_frame.img)).compress(95),
-        # )
 
         rr.log(
             '/tracking/psnr',
@@ -213,7 +196,7 @@ class Frontend(mp.Process):
             self.output_dir / f'gt/{len(self.frames):08}.jpg'
         )
 
-        torch_to_pil(_rendered_alpha[0, ..., 0]).save(
+        torch_to_pil(outputs.alphas[0, ..., 0]).save(
             self.output_dir / f'alphas/{len(self.frames):08}.jpg'
         )
 
@@ -295,25 +278,25 @@ class Frontend(mp.Process):
 
     def dump_video(self):
         for i, kf in enumerate(self.keyframes):
-            rendered_rgb, _rendered_alpha, _render_info = self.splats(
+            outputs = self.splats(
                 [kf.camera],
                 [kf.pose],
             )
-            torch_to_pil(rendered_rgb[0]).save(self.output_dir / f'final/{i:08}.jpg')
+            torch_to_pil(outputs.rgbs[0]).save(self.output_dir / f'final/{i:08}.jpg')
 
             rr.log(
                 f'/tracking/pose_{i}/image',
                 rr.Image(
-                    torch_image_to_np(rendered_rgb[0]), color_model=rr.ColorModel.RGB
+                    torch_image_to_np(outputs.rgbs[0]), color_model=rr.ColorModel.RGB
                 ).compress(jpeg_quality=95),
             )
 
         for i, kf in enumerate(self.frames):
-            rendered_rgb, _rendered_alpha, _render_info = self.splats(
+            outputs = self.splats(
                 [kf.camera],
                 [kf.pose],
             )
-            torch_to_pil(rendered_rgb[0]).save(
+            torch_to_pil(outputs.rgbs[0]).save(
                 self.output_dir / f'final_renders/{i:08}.jpg'
             )
 

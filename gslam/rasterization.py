@@ -1,9 +1,10 @@
+from dataclasses import dataclass
 import math
-from typing import Dict, Optional, Tuple
+from typing import Optional, ClassVar
+from typing_extensions import Literal
 
 import torch
 from torch import Tensor
-from typing_extensions import Literal
 
 from gsplat.cuda._wrapper import (
     fully_fused_projection,
@@ -11,6 +12,32 @@ from gsplat.cuda._wrapper import (
     isect_tiles,
     rasterize_to_pixels,
 )
+
+
+@dataclass
+class RasterizationOutput:
+    per_gaussian_params: ClassVar[tuple[str]] = ('radii', 'means2d')
+    rgbs: torch.Tensor = None
+    alphas: torch.Tensor = None
+    depths: torch.Tensor = None
+    betas: torch.Tensor = None
+    tile_width: int = None
+    tile_height: int = None
+    tiles_per_gauss: torch.Tensor = None
+    isect_ids: torch.Tensor = None
+    flatten_ids: torch.Tensor = None
+    isect_offsets: torch.Tensor = None
+    width: int = None
+    height: int = None
+    tile_size: int = None
+    n_cameras: int = None
+    camera_ids: torch.Tensor = None
+    gaussian_ids: torch.Tensor = None
+    radii: torch.Tensor = None
+    means2d: torch.Tensor = None
+    depths: torch.Tensor = None
+    conics: torch.Tensor = None
+    opacities: torch.Tensor = None
 
 
 def rasterization(
@@ -38,7 +65,7 @@ def rasterization(
     camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole",
     covars: Optional[Tensor] = None,
     log_betas: Optional[Tensor] = None,
-) -> Tuple[Tensor, Tensor, Dict]:
+) -> RasterizationOutput:
     """Rasterize a set of 3D Gaussians (N) to a batch of image planes (C).
 
     Args:
@@ -316,4 +343,10 @@ def rasterization(
     else:
         render_colors = None
 
-    return render_colors, render_alphas, meta
+    ret = RasterizationOutput(
+        rgbs=render_colors,
+        alphas=render_alphas,
+        **meta,
+    )
+
+    return ret

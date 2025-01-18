@@ -8,11 +8,12 @@ from typing import Dict, List
 import torch
 import tqdm
 
+from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, Pose
 from .pruning import PruneLowOpacity, PruneLargeGaussians
-from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
+from .rasterization import RasterizationOutput
 from .utils import create_batch
 
 
@@ -53,6 +54,9 @@ class MapConfig:
 
     opacity_pruning_threshold: float = 0.6
     size_pruning_threshold: int = 256
+
+    reset_opacity: bool = True
+    opacity_after_reset: float = 0.5
 
 
 class Backend(torch.multiprocessing.Process):
@@ -113,6 +117,15 @@ class Backend(torch.multiprocessing.Process):
             if self.initialized
             else self.conf.num_iters_initialization
         )
+
+        if self.conf.reset_opacity:
+            with torch.no_grad():
+                # reset opacities. not sure if no_grad is needed here.
+                self.splats.opacities.data = torch.logit(
+                    torch.sigmoid(self.splats.opacities.data) * 0.0
+                    + self.conf.opacity_after_reset
+                )
+
         for step in (pbar := tqdm.trange(n_iters)):
             window = self.optimization_window()
             cameras = [x.camera for x in window]
@@ -120,16 +133,16 @@ class Backend(torch.multiprocessing.Process):
             gt_imgs = create_batch(window, lambda x: x.img)
             self.zero_grad_all_optimizers()
 
-            render_colors, render_alphas, render_info = self.splats(
+            outputs = self.splats(
                 cameras,
                 poses,
             )
 
             # unsqueeze so that broadcast multiplication works out
-            inv_betas = render_info['betas'].pow(-1.0).unsqueeze(-1)
-            photometric_loss = ((render_colors - gt_imgs) * inv_betas).square().mean()
+            inv_betas = outputs.betas.pow(-1.0).unsqueeze(-1)
+            photometric_loss = ((outputs.rgbs - gt_imgs) * inv_betas).square().mean()
 
-            visible_gaussians = render_info['radii'].sum(dim=0) > 0
+            visible_gaussians = outputs.radii.sum(dim=0) > 0
             mean_scales = (
                 self.splats.scales[visible_gaussians]
                 .mean(dim=1, keepdim=True)
@@ -148,17 +161,15 @@ class Backend(torch.multiprocessing.Process):
                 + self.conf.betas_regularization_weight * betas_loss
             )
 
-            render_info['means2d'].retain_grad()
+            outputs.means2d.retain_grad()
 
             total_loss.backward()
 
-            if (step % 40) == 0:
+            if step in (n_iters // 3, 2 * n_iters // 3):
                 self.insertion_3dgs.step(
                     self.splats,
                     self.splat_optimizers,
-                    render_colors,
-                    render_alphas,
-                    render_info,
+                    outputs,
                     None,
                     None,
                 )
@@ -173,22 +184,31 @@ class Backend(torch.multiprocessing.Process):
             self.step_all_optimizers()
 
             self.pruning_size.step(
-                self.splats, self.splat_optimizers, render_info['radii']
+                self.splats,
+                self.splat_optimizers,
+                outputs.radii,
             )
-            self.pruning_opacity.step(self.splats, self.splat_optimizers)
 
-        render_colors, _render_alphas, render_info = self.splats(
+            if step in (n_iters // 2, n_iters):
+                self.pruning_opacity.step(self.splats, self.splat_optimizers)
+
+        outputs = self.splats(
             [self.keyframes[-1].camera],
             [self.keyframes[-1].pose],
         )
 
-        self.keyframes[-1].visible_gaussians = (render_info['radii'][0] > 0).detach()
+        self.keyframes[-1].visible_gaussians = (outputs.radii[0] > 0).detach()
         return
 
     def optimize_final(self):
         n_iters = self.conf.num_iters_initialization
+
         with torch.no_grad():
-            self.splats.opacities.data = self.splats.opacities.data * 0.0 + 0.3
+            # reset opacities. not sure if no_grad is needed here.
+            self.splats.opacities.data = torch.logit(
+                torch.sigmoid(self.splats.opacities.data) * 0.0
+                + self.conf.opacity_after_reset
+            )
         for step in (pbar := tqdm.trange(n_iters)):
             window = random.sample(self.keyframes, min(10, len(self.keyframes)))
             cameras = [x.camera for x in window]
@@ -196,12 +216,12 @@ class Backend(torch.multiprocessing.Process):
             gt_imgs = create_batch(window, lambda x: x.img)
             self.zero_grad_all_optimizers()
 
-            render_colors, _render_alphas, _render_info = self.splats(
+            outputs = self.splats(
                 cameras,
                 poses,
             )
 
-            loss = (render_colors - gt_imgs).square().mean()
+            loss = (outputs.rgbs - gt_imgs).square().mean()
             loss.backward()
 
             if ((step + 1) % (n_iters // 3)) == 0:
@@ -284,12 +304,12 @@ class Backend(torch.multiprocessing.Process):
         mock_depth_map *= self.conf.initial_scale
         mock_alphas = torch.ones((1, H, W, 1), device=self.conf.device)
 
+        mock_outputs = RasterizationOutput(None, mock_alphas, mock_depth_map)
+
         self.insertion_depth_map.step(
             self.splats,
             self.splat_optimizers,
-            None,
-            mock_alphas,
-            {'depths': mock_depth_map},
+            mock_outputs,
             frame,
             10000,
         )
@@ -302,18 +322,16 @@ class Backend(torch.multiprocessing.Process):
 
     def add_keyframe(self, frame: Frame):
         with torch.no_grad():
-            render_colors, _render_alphas, render_info = self.splats(
+            outputs = self.splats(
                 [frame.camera],
                 [frame.pose],
                 render_depth=True,
             )
-        render_info['depths'] *= self.conf.initial_scale
+        outputs.depths *= self.conf.initial_scale
         self.insertion_depth_map.step(
             self.splats,
             self.splat_optimizers,
-            render_colors.squeeze(0),
-            _render_alphas.squeeze(0),
-            render_info,
+            outputs,
             frame,
             N=500,
         )

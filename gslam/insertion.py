@@ -3,6 +3,7 @@ import math
 
 from .map import GaussianSplattingData
 from .primitives import Frame
+from .rasterization import RasterizationOutput
 from .utils import knn
 from typing import Dict, List
 
@@ -17,9 +18,7 @@ class InsertionStrategy(ABC):
         self,
         splats: GaussianSplattingData,
         optimizers: Dict[str, Optimizer],
-        rendered_colors: torch.Tensor,
-        rendered_alphas: torch.Tensor,
-        meta: Dict,
+        rasterization_output: RasterizationOutput,
         frame: Frame,
         N: int,
     ):
@@ -114,27 +113,26 @@ class InsertFromDepthMap(InsertionStrategy):
         self,
         splats: GaussianSplattingData,
         optimizers: Dict[str, Optimizer],
-        rendered_colors: torch.Tensor,
-        rendered_alphas: torch.Tensor,
-        meta: Dict,
+        rasterization_output: RasterizationOutput,
         frame: Frame,
         N: int,
     ):
-        depths = meta['depths'][0, ...]
-        alphas = rendered_alphas[0, ..., 0]
+        depths = rasterization_output.depths[0, ...]
+        alphas = rasterization_output.alphas[0, ..., 0]
 
         device = depths.device
         valid_depth_region = torch.logical_and(
             alphas > self.min_alpha_for_depth, depths > 0
         )
 
-        invalid_depth_region = torch.logical_not(valid_depth_region)
-        if invalid_depth_region.sum() < N:
-            n_invalid_depth_splats = invalid_depth_region.sum()
-            n_valid_depth_splats = N - n_invalid_depth_splats
-        else:
-            n_invalid_depth_splats = N
-            n_valid_depth_splats = 0
+        n_valid_depth_pixels = valid_depth_region.shape.numel()
+        n_invalid_depth_pixels = depths.shape.numel() - n_valid_depth_pixels
+
+        # prefer to add N nsplats in the region where we don't have geometry already
+        n_invalid_depth_splats = min(N, n_invalid_depth_pixels)
+        n_valid_depth_splats = max(
+            0, min(N - n_invalid_depth_splats, n_valid_depth_pixels)
+        )
 
         median_depth = depths[valid_depth_region].median()
 
@@ -238,17 +236,19 @@ class InsertUsingImagePlaneGradients(InsertionStrategy):
         self,
         splats: GaussianSplattingData,
         optimizers: Dict[str, Optimizer],
-        rendered_colors: torch.Tensor,
-        rendered_alphas: torch.Tensor,
-        meta: Dict,
+        rasterization_output: RasterizationOutput,
         frame: Frame,
         N: int,
     ):
-        grads = meta['means2d'].grad.clone()
+        grads = rasterization_output.means2d.grad.clone()
 
         # normalize grads by image size
-        grads[..., 0] *= meta["width"] / 2.0 * meta["n_cameras"]
-        grads[..., 1] *= meta["height"] / 2.0 * meta["n_cameras"]
+        grads[..., 0] *= (
+            rasterization_output.width / 2.0 * rasterization_output.n_cameras
+        )
+        grads[..., 1] *= (
+            rasterization_output.height / 2.0 * rasterization_output.n_cameras
+        )
 
         grads = grads.norm(dim=-1).mean(dim=0)
 
@@ -273,15 +273,15 @@ class InsertUsingImagePlaneGradients(InsertionStrategy):
         if num_split > 0:
             self._add_new_splats(splats, optimizers, split_splats)
 
-        meta['radii'] = torch.cat(
+        rasterization_output.radii = torch.cat(
             [
-                meta['radii'],
+                rasterization_output.radii,
                 torch.zeros(
                     [
-                        meta['radii'].shape[0],
+                        rasterization_output.radii.shape[0],
                         num_duplicate + num_split,
                     ],
-                    device=meta['radii'].device,
+                    device=rasterization_output.radii.device,
                 ),
             ],
             dim=1,
@@ -298,9 +298,7 @@ class SequentialInsertion(InsertionStrategy):
         self,
         splats: GaussianSplattingData,
         optimizers: Dict[str, Optimizer],
-        rendered_colors: torch.Tensor,
-        rendered_alphas: torch.Tensor,
-        meta: Dict,
+        rasterization_output: RasterizationOutput,
         frame: Frame,
         N: int,
     ):
@@ -308,9 +306,7 @@ class SequentialInsertion(InsertionStrategy):
             strategy.step(
                 splats,
                 optimizers,
-                rendered_colors,
-                rendered_alphas,
-                meta,
+                rasterization_output,
                 frame,
                 N,
             )
