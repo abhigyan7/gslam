@@ -22,6 +22,7 @@ class MapConfig:
     isotropic_regularization_weight: float = 10.0
     opacity_regularization_weight: float = 0.000005
     betas_regularization_weight: float = 200.0
+    depth_regularization_weight: float = 0.0001
 
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
@@ -55,8 +56,14 @@ class MapConfig:
     opacity_pruning_threshold: float = 0.6
     size_pruning_threshold: int = 256
 
-    reset_opacity: bool = True
+    reset_opacity: bool = False
     opacity_after_reset: float = 0.5
+
+
+def total_variation_loss(img: torch.Tensor) -> torch.Tensor:
+    tv_h = (img[..., 1:, :] - img[..., :-1, :]).pow(2).sum()
+    tv_w = (img[..., :, 1:] - img[..., :, :-1]).pow(2).sum()
+    return tv_h + tv_w
 
 
 class Backend(torch.multiprocessing.Process):
@@ -122,8 +129,7 @@ class Backend(torch.multiprocessing.Process):
             with torch.no_grad():
                 # reset opacities. not sure if no_grad is needed here.
                 self.splats.opacities.data = torch.logit(
-                    torch.sigmoid(self.splats.opacities.data) * 0.0
-                    + self.conf.opacity_after_reset
+                    torch.sigmoid(self.splats.opacities.data) * 0.5
                 )
 
         for step in (pbar := tqdm.trange(n_iters)):
@@ -133,9 +139,10 @@ class Backend(torch.multiprocessing.Process):
             gt_imgs = create_batch(window, lambda x: x.img)
             self.zero_grad_all_optimizers()
 
-            outputs = self.splats(
+            outputs: RasterizationOutput = self.splats(
                 cameras,
                 poses,
+                render_depth=True,
             )
 
             # unsqueeze so that broadcast multiplication works out
@@ -154,11 +161,13 @@ class Backend(torch.multiprocessing.Process):
             )
             betas_loss = self.splats.betas[visible_gaussians].mean()
             opacity_loss = self.splats.opacities[visible_gaussians].mean()
+            depth_loss = total_variation_loss(outputs.depthmaps)
             total_loss = (
                 photometric_loss
                 + self.conf.isotropic_regularization_weight * isotropic_loss
                 + self.conf.opacity_regularization_weight * opacity_loss
                 + self.conf.betas_regularization_weight * betas_loss
+                + self.conf.depth_regularization_weight * depth_loss
             )
 
             outputs.means2d.retain_grad()
@@ -327,7 +336,7 @@ class Backend(torch.multiprocessing.Process):
                 [frame.pose],
                 render_depth=True,
             )
-        outputs.depths *= self.conf.initial_scale
+        outputs.depthmaps *= self.conf.initial_scale
         self.insertion_depth_map.step(
             self.splats,
             self.splat_optimizers,

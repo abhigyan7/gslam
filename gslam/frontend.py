@@ -148,7 +148,7 @@ class Frontend(mp.Process):
                 [new_frame.camera], [new_frame.pose], render_depth=True
             )
             rendered_rgb = outputs.rgbs[0]
-            rendered_depth = outputs.depths[0]
+            rendered_depth = outputs.depthmaps[0]
             rendered_beta = outputs.betas[0]
 
             new_frame.visible_gaussians = outputs.radii > 0

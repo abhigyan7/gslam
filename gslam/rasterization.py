@@ -19,7 +19,7 @@ class RasterizationOutput:
     per_gaussian_params: ClassVar[tuple[str]] = ('radii', 'means2d')
     rgbs: torch.Tensor = None
     alphas: torch.Tensor = None
-    depths: torch.Tensor = None
+    depthmaps: torch.Tensor = None
     betas: torch.Tensor = None
     tile_width: int = None
     tile_height: int = None
@@ -332,10 +332,10 @@ def rasterization(
             absgrad=absgrad,
         )
     if render_mode in ["ED", "RGB+ED", "D", "RGB+D"]:
-        meta['depths'] = render_colors[..., depth_index]
+        meta['depthmaps'] = render_colors[..., depth_index]
     if render_mode in ["ED", "RGB+ED", "ED"]:
         # normalize the accumulated depth to get the expected depth
-        meta['depths'] = (meta['depths'] / render_alphas.clamp(min=1e-10),)
+        meta['depthmaps'] = (meta['depthaps'] / render_alphas.clamp(min=1e-10),)
     if log_betas is not None:
         meta['betas'] = render_colors[..., betas_index]
     if render_mode not in ['D', 'ED']:

@@ -117,7 +117,7 @@ class InsertFromDepthMap(InsertionStrategy):
         frame: Frame,
         N: int,
     ):
-        depths = rasterization_output.depths[0, ...]
+        depths = rasterization_output.depthmaps[0, ...]
         alphas = rasterization_output.alphas[0, ..., 0]
 
         device = depths.device
