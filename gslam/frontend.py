@@ -1,5 +1,6 @@
 from copy import deepcopy
 from dataclasses import dataclass
+import json
 import logging
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import List, Literal, assert_never
 import torch
 import torch.multiprocessing as mp
 
+from PIL import Image
 import rerun as rr
 import tqdm
 
@@ -18,7 +20,7 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, Pose
-from .trajectory import kabsch_umeyama, average_translation_error
+from .trajectory import evaluate_trajectories
 from .utils import (
     get_projection_matrix,
     q_get,
@@ -28,7 +30,6 @@ from .utils import (
 )
 
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 
@@ -223,6 +224,7 @@ class Frontend(mp.Process):
                 Pose(new_frame.pose(), False),
                 new_frame.gt_pose,
                 None,
+                img_file=new_frame.img_file,
             )
         )
 
@@ -240,6 +242,7 @@ class Frontend(mp.Process):
                 Pose(frame.pose(), False),
                 frame.gt_pose,
                 None,
+                img_file=frame.img_file,
             )
         )
         self.frozen_keyframes.append(frame)
@@ -283,7 +286,7 @@ class Frontend(mp.Process):
             static=True,
         )
 
-    def dump_video(self):
+    def evaluate_reconstruction(self):
         for i, kf in enumerate(self.keyframes):
             outputs = self.splats(
                 [kf.camera],
@@ -298,101 +301,48 @@ class Frontend(mp.Process):
                 ).compress(jpeg_quality=95),
             )
 
-        for i, kf in enumerate(self.frames):
+        psnrs = []
+        ssims = []
+
+        for i, f in enumerate(self.frames):
             outputs = self.splats(
-                [kf.camera],
-                [kf.pose],
+                [f.camera],
+                [f.pose],
             )
             torch_to_pil(outputs.rgbs[0]).save(
                 self.output_dir / f'final_renders/{i:08}.jpg'
             )
 
-        os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final.mp4"}'
-        )
-        os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/gt/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"gt.mp4"}'
-        )
-        os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/renders/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"renders.mp4"}'
-        )
-        os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_renders/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final_renders.mp4"}'
-        )
+            if f.img_file is None:
+                continue
+            gt_img = np.array(Image.open(f.img_file))
+            psnrs.append(
+                psnr(
+                    torch_image_to_np(outputs.rgbs[0]),
+                    gt_img,
+                )
+            )
+            ssims.append(
+                ssim(
+                    torch_image_to_np(outputs.rgbs[0]),
+                    gt_img,
+                    channel_axis=2,
+                )
+            )
+
+        return {'ssim': np.mean(ssims), 'psnr': np.mean(psnrs)}
 
     @torch.no_grad
-    def dump_trajectory(self):
-        Rts = [f.pose().cpu().numpy() for f in self.frozen_keyframes]
-        ts = np.array([Rt[:3, 3] for Rt in Rts])
-        gt_Rts = [f.gt_pose.cpu().numpy() for f in self.frozen_keyframes]
-        gt_ts = np.array([Rt[:3, 3] for Rt in gt_Rts])
+    def evaluate_trajectory(self) -> dict:
+        fig, ates = evaluate_trajectories(
+            {
+                'frozen': self.frozen_keyframes,
+                'optimized': self.keyframes,
+                'tracking': self.frames,
+            }
+        )
 
-        R, c, t = kabsch_umeyama(gt_ts, ts)
-        # TODO might need to get rid of this, it sets the first frames
-        # to be in the same location for the gt and estimated trajectory
-        # for easy comparision in plots
-        t = gt_ts[0, ...]
-        aligned_ts = np.array([t + c * R @ b for b in ts])
-
-        fig, ax = plt.subplots()
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
-        ax.plot(gt_ts[..., 0], gt_ts[..., 1], label='ground truth')
-        ax.plot(aligned_ts[..., 0], aligned_ts[..., 1], label='gslam')
-        ax.set_aspect('equal')
-        ax.legend()
-        fig.savefig(self.output_dir / 'frozen_keyframes.png')
-
-        Rts = [f.pose().cpu().numpy() for f in self.frames]
-        ts = np.array([Rt[:3, 3] for Rt in Rts])
-        gt_Rts = [f.gt_pose.cpu().numpy() for f in self.frames]
-        gt_ts = np.array([Rt[:3, 3] for Rt in gt_Rts])
-
-        R, c, t = kabsch_umeyama(gt_ts, ts)
-        # TODO might need to get rid of this, it sets the first frames
-        # to be in the same location for the gt and estimated trajectory
-        # for easy comparision in plots
-        t = gt_ts[0, ...]
-        aligned_ts = np.array([t + c * R @ b for b in ts])
-
-        fig, ax = plt.subplots()
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
-        ax.plot(gt_ts[..., 0], gt_ts[..., 1], label='ground truth')
-        ax.plot(aligned_ts[..., 0], aligned_ts[..., 1], label='gslam')
-        ax.set_aspect('equal')
-        ax.legend()
         fig.savefig(self.output_dir / 'traj.png')
-
-        ate = average_translation_error(gt_ts, ts)
-        print(f'{ate=}')
-
-        Rts = [f.pose().cpu().numpy() for f in self.keyframes]
-        ts = np.array([Rt[:3, 3] for Rt in Rts])
-        gt_Rts = [f.gt_pose.cpu().numpy() for f in self.keyframes]
-        gt_ts = np.array([Rt[:3, 3] for Rt in gt_Rts])
-
-        R, c, t = kabsch_umeyama(gt_ts, ts)
-        # TODO might need to get rid of this, it sets the first frames
-        # to be in the same location for the gt and estimated trajectory
-        # for easy comparision in plots
-        t = gt_ts[0, ...]
-        aligned_ts = np.array([t + c * R @ b for b in ts])
-
-        fig, ax = plt.subplots()
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
-        ax.plot(gt_ts[..., 0], gt_ts[..., 1], label='ground truth')
-        ax.plot(aligned_ts[..., 0], aligned_ts[..., 1], label='gslam')
-        ax.set_aspect('equal')
-        ax.legend()
-        fig.savefig(self.output_dir / 'map_traj.png')
-
-        ate = average_translation_error(gt_ts, ts)
-        print(f'{ate=}')
-
-        with open(self.output_dir / 'ate.txt', 'w') as f:
-            f.write(f'{ate=}')
 
         for i, f in enumerate(self.frames):
             q, t = f.pose.to_qt()
@@ -425,6 +375,21 @@ class Frontend(mp.Process):
                     ],
                 ),
             )
+        return ates
+
+    def create_videos(self):
+        os.system(
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final.mp4"}'
+        )
+        os.system(
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/gt/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"gt.mp4"}'
+        )
+        os.system(
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/renders/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"renders.mp4"}'
+        )
+        os.system(
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_renders/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final_renders.mp4"}'
+        )
 
     @rr.shutdown_at_exit
     def run(self):
@@ -471,10 +436,16 @@ class Frontend(mp.Process):
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')
 
-        self.dump_trajectory()
         self.dump_pointcloud()
-        self.dump_video()
-        print('Done dumping everything')
-        self.logger.warning('emitted frontend done.')
+        metrics = dict()
+        metrics.update(self.evaluate_reconstruction())
+        metrics.update(self.evaluate_trajectory())
+        self.create_videos()
+
+        print(f'{metrics=}')
+        with open(self.output_dir / 'metrics.json', 'w') as f:
+            json.dump(metrics, f)
+
+        self.logger.warning('frontend done.')
 
         self.frontend_done_event.set()

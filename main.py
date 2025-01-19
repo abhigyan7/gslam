@@ -18,6 +18,7 @@ class PipelineConfig:
     m: MapConfig = field(default_factory=lambda: MapConfig())
     t: TrackingConfig = field(default_factory=lambda: TrackingConfig())
     seq_len: int = -1
+    run_name: str = ''
 
 
 def main(conf: PipelineConfig):
@@ -35,7 +36,10 @@ def main(conf: PipelineConfig):
     )
 
     runs_dir = Path('runs')
-    output_dir = runs_dir / datetime.now().strftime('%Y-%m-%d--%H-%M-%S')
+    run_name = conf.run_name
+    if run_name == '':
+        run_name = datetime.now().strftime('%Y-%m-%d--%H-%M-%S')
+    output_dir = runs_dir / run_name
     os.makedirs(output_dir, exist_ok=True)
 
     with open(output_dir / 'args.txt', 'w') as f:

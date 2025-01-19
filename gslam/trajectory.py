@@ -1,6 +1,10 @@
 import numpy as np
 from typing import Tuple
 
+from matplotlib import pyplot as plt
+
+from .primitives import Frame
+
 
 def kabsch_umeyama(
     A: np.ndarray, B: np.ndarray
@@ -34,3 +38,37 @@ def average_translation_error(A: np.ndarray, B: np.ndarray) -> float:
     error = aligned - A
     ate = np.sqrt(np.mean(np.sum(np.multiply(error, error), -1)))
     return ate
+
+
+def plot_trajectory(trajectories: list, labels: list[str], ax):
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    for trajectory, label in zip(trajectories, labels):
+        ax.plot(trajectory[..., 0], trajectory[..., 1], label=label)
+    ax.set_aspect('equal')
+    ax.legend()
+
+
+def evaluate_trajectories(trajectories: dict[str, list[Frame]]):
+    fig, axes = plt.subplots(1, len(trajectories))
+    fig.set_figwidth(5 * len(trajectories))
+    fig.set_figheight(5)
+
+    ates = dict()
+
+    for traj_name, ax in zip(trajectories, axes):
+        gt_Rts = np.array([f.gt_pose.cpu().numpy() for f in trajectories[traj_name]])
+        estimated_Rts = np.array(
+            [f.pose().cpu().numpy() for f in trajectories[traj_name]]
+        )
+        R, c, t = kabsch_umeyama(gt_Rts[:, :3, 3], estimated_Rts[:, :3, 3])
+        estimated_ts = np.array([t + c * R @ b[:3, 3] for b in estimated_Rts])
+        gt_ts = gt_Rts[..., :3, 3]
+
+        plot_trajectory([gt_ts, estimated_ts], ['gt', traj_name], ax)
+        ax.set_aspect('equal')
+        ax.set_box_aspect(1)
+
+        ates['ate_' + traj_name] = average_translation_error(gt_ts, estimated_ts)
+
+    return fig, ates

@@ -79,7 +79,9 @@ class TumRGB:
             ]
         ).cuda()
         camera = Camera(Ks, height, width)
-        frame = Frame(image, ts, camera, Pose(), gt_pose, depth_image)
+        frame = Frame(
+            image, ts, camera, Pose(), gt_pose, depth_image, img_file=rgb_filename
+        )
         return frame
 
 

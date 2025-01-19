@@ -52,7 +52,7 @@ class MapConfig:
     optim_window_random_keyframes: int = 5
 
     num_iters_mapping: int = 150
-    num_iters_initialization: int = 1050
+    num_iters_initialization: int = 300
 
     opacity_pruning_threshold: float = 0.6
     size_pruning_threshold: int = 256
@@ -62,7 +62,7 @@ class MapConfig:
 
     # used in the final optimization
     ssim_weight: float = 0.2  # in [0,1]
-    num_iters_final: int = 2000
+    num_iters_final: int = 200
 
 
 def total_variation_loss(img: torch.Tensor) -> torch.Tensor:
@@ -372,6 +372,7 @@ class Backend(torch.multiprocessing.Process):
             pose=Pose(frame.pose()).to(self.conf.device),
             gt_pose=frame.gt_pose,
             gt_depth=frame.gt_depth,
+            img_file=frame.img_file,
         )
 
         self.keyframes.append(new_frame)

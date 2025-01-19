@@ -232,6 +232,7 @@ class Frame:
     gt_pose: torch.Tensor
     gt_depth: torch.Tensor = field(default=None)
     visible_gaussians: torch.Tensor = field(default=None)
+    img_file: str = None
 
     def to(self, device):
         ret = Frame(
@@ -244,6 +245,7 @@ class Frame:
             if self.visible_gaussians is not None
             else None,
             gt_depth=self.gt_depth.to(device) if self.gt_depth is not None else None,
+            img_file=self.img_file,
         )
         return ret
 
