@@ -20,14 +20,20 @@ def kabsch_umeyama(
     EB = np.mean(B, axis=0)
     VarA = np.mean(np.linalg.norm(A - EA, axis=1) ** 2)
 
-    H = ((A - EA).T @ (B - EB)) / n
-    U, D, VT = np.linalg.svd(H)
-    d = np.sign(np.linalg.det(U) * np.linalg.det(VT))
-    S = np.diag([1] * (m - 1) + [d])
+    try:
+        H = ((A - EA).T @ (B - EB)) / n
+        U, D, VT = np.linalg.svd(H)
+        d = np.sign(np.linalg.det(U) * np.linalg.det(VT))
+        S = np.diag([1] * (m - 1) + [d])
 
-    R = U @ S @ VT
-    c = VarA / np.trace(np.diag(D) @ S)
-    t = EA - c * R @ EB
+        R = U @ S @ VT
+        c = VarA / np.trace(np.diag(D) @ S)
+        t = EA - c * R @ EB
+    except np.linalg.LinAlgError as e:
+        print(f'{e=}')
+        R = np.eye(3)
+        c = 1.0
+        t = np.array([0, 0, 0], dtype=np.float32)
 
     return R, c, t
 
