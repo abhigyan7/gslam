@@ -64,6 +64,8 @@ class MapConfig:
     ssim_weight: float = 0.2  # in [0,1]
     num_iters_final: int = 200
 
+    use_betas: bool = True
+
 
 def total_variation_loss(img: torch.Tensor) -> torch.Tensor:
     tv_h = (img[..., 1:, :] - img[..., :-1, :]).pow(2).sum()
@@ -98,6 +100,9 @@ class Backend(torch.multiprocessing.Process):
             0.01,
         )
         self.initialized: bool = False
+
+        if not self.conf.use_betas:
+            self.conf.betas_regularization_weight = 0.0
 
     def optimization_window(self):
         window_size_total = (
@@ -151,7 +156,9 @@ class Backend(torch.multiprocessing.Process):
             )
 
             # unsqueeze so that broadcast multiplication works out
-            inv_betas = outputs.betas.pow(-1.0).unsqueeze(-1)
+            inv_betas = 1.0
+            if self.conf.use_betas:
+                inv_betas = outputs.betas.pow(-1.0).unsqueeze(-1)
             photometric_loss = ((outputs.rgbs - gt_imgs) * inv_betas).square().mean()
 
             visible_gaussians = outputs.radii.sum(dim=0) > 0

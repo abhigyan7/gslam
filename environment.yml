@@ -40,4 +40,5 @@ dependencies:
     - matplotlib
     - pytest
     - pre-commit
+    - nerfview
 

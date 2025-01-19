@@ -446,6 +446,10 @@ class Frontend(mp.Process):
         with open(self.output_dir / 'metrics.json', 'w') as f:
             json.dump(metrics, f)
 
+        checkpoint_file = self.output_dir / 'splats.ckpt'
+        torch.save(self.splats, checkpoint_file)
+        print(f'Saved Checkpoints to {checkpoint_file}')
+
         self.logger.warning('frontend done.')
 
         self.frontend_done_event.set()
