@@ -35,6 +35,7 @@ class GaussianSplattingData(torch.nn.Module):
         cameras: List[Camera],
         poses: List[Pose],
         render_depth: bool = False,
+        visibility_min_T: float = 0.5,
     ) -> RasterizationOutput:
         render_mode = 'RGB+D' if render_depth else 'RGB'
 
@@ -54,6 +55,7 @@ class GaussianSplattingData(torch.nn.Module):
             render_mode=render_mode,
             packed=False,
             log_betas=self.betas,
+            visibility_min_T=visibility_min_T,
         )
 
     @staticmethod

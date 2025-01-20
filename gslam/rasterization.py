@@ -38,6 +38,7 @@ class RasterizationOutput:
     depths: torch.Tensor = None
     conics: torch.Tensor = None
     opacities: torch.Tensor = None
+    n_touched: torch.Tensor = None
 
 
 def rasterization(
@@ -65,6 +66,7 @@ def rasterization(
     camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole",
     covars: Optional[Tensor] = None,
     log_betas: Optional[Tensor] = None,
+    visibility_min_T: float = 0.5,
 ) -> RasterizationOutput:
     """Rasterize a set of 3D Gaussians (N) to a batch of image planes (C).
 
@@ -111,11 +113,7 @@ def rasterization(
         log_betas: Optional confidences (betas) for the Gaussians. [N,].
 
     Returns:
-        A tuple:
-
-        **render_colors**: The rendered colors. [C, height, width, D].
-        **render_alphas**: The rendered alphas. [C, height, width, 1].
-        **meta**: A dictionary of intermediate results of the rasterization.
+        RasterizationOutput
 
     """
     meta = {}
@@ -290,7 +288,7 @@ def rasterization(
     if colors.shape[-1] > channel_chunk:
         # slice into chunks
         n_chunks = (colors.shape[-1] + channel_chunk - 1) // channel_chunk
-        render_colors, render_alphas = [], []
+        render_colors, render_alphas, n_toucheds = [], [], []
         for i in range(n_chunks):
             colors_chunk = colors[..., i * channel_chunk : (i + 1) * channel_chunk]
             backgrounds_chunk = (
@@ -298,7 +296,7 @@ def rasterization(
                 if backgrounds is not None
                 else None
             )
-            render_colors_, render_alphas_ = rasterize_to_pixels(
+            render_colors_, render_alphas_, n_touched = rasterize_to_pixels(
                 means2d,
                 conics,
                 colors_chunk,
@@ -311,13 +309,16 @@ def rasterization(
                 backgrounds=backgrounds_chunk,
                 packed=packed,
                 absgrad=absgrad,
+                visibility_min_T=visibility_min_T,
             )
             render_colors.append(render_colors_)
             render_alphas.append(render_alphas_)
+            n_toucheds.append(n_touched)
         render_colors = torch.cat(render_colors, dim=-1)
         render_alphas = render_alphas[0]  # discard the rest
+        n_touched = torch.cat(n_touched, dim=-1)
     else:
-        render_colors, render_alphas = rasterize_to_pixels(
+        render_colors, render_alphas, n_touched = rasterize_to_pixels(
             means2d,
             conics,
             colors,
@@ -330,6 +331,7 @@ def rasterization(
             backgrounds=backgrounds,
             packed=packed,
             absgrad=absgrad,
+            visibility_min_T=visibility_min_T,
         )
     if render_mode in ["ED", "RGB+ED", "D", "RGB+D"]:
         meta['depthmaps'] = render_colors[..., depth_index]
@@ -342,6 +344,8 @@ def rasterization(
         render_colors = render_colors[..., :3]
     else:
         render_colors = None
+
+    meta['n_touched'] = n_touched.long()
 
     ret = RasterizationOutput(
         rgbs=render_colors,

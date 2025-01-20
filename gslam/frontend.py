@@ -91,11 +91,25 @@ class Frontend(mp.Process):
         os.makedirs(self.output_dir / 'betas', exist_ok=True)
         os.makedirs(self.output_dir / 'final_renders', exist_ok=True)
 
-    def to_insert_keyframe(self, iou, _oc, _new_frame):
+    def to_insert_keyframe(self, previous_keyframe, new_frame):
         # TODO implement insertion on pose diffs
         # TODO implement insertion on the last keyframe insertion
         #      being too far away in time
         # TODO implement insertion on visibility criterion like they do in MonoGS
+        n_visible_gaussians = new_frame.visible_gaussians.sum()
+        n_visible_gaussians_last_kf = previous_keyframe.visible_gaussians.sum()
+
+        intersection = torch.logical_and(
+            new_frame.visible_gaussians, previous_keyframe.visible_gaussians
+        )
+        union = torch.logical_or(
+            new_frame.visible_gaussians, previous_keyframe.visible_gaussians
+        )
+
+        iou = intersection.sum() / union.sum()
+        _oc = intersection.sum() / (
+            min(n_visible_gaussians.sum().item(), n_visible_gaussians_last_kf.sum())
+        )
         return iou < self.conf.kf_cov
 
     def tracking_loss(
@@ -116,7 +130,7 @@ class Frontend(mp.Process):
                 assert_never(self.conf.photometric_loss)
 
     def track(self, new_frame: Frame):
-        previous_keyframe = self.keyframes[-1]
+        # previous_keyframe = self.keyframes[-1]
         previous_frame = self.frames[-1]
 
         # start with unit Rt difference?
@@ -160,21 +174,6 @@ class Frontend(mp.Process):
             rendered_beta = outputs.betas[0]
 
             new_frame.visible_gaussians = outputs.radii > 0
-
-            n_visible_gaussians = new_frame.visible_gaussians.sum()
-            n_visible_gaussians_last_kf = previous_keyframe.visible_gaussians.sum()
-
-            intersection = torch.logical_and(
-                new_frame.visible_gaussians, previous_keyframe.visible_gaussians
-            )
-            union = torch.logical_or(
-                new_frame.visible_gaussians, previous_keyframe.visible_gaussians
-            )
-
-            iou = intersection.sum() / union.sum()
-            oc = intersection.sum() / (
-                min(n_visible_gaussians.sum().item(), n_visible_gaussians_last_kf.sum())
-            )
 
         rr.log(
             '/tracking/psnr',
@@ -228,7 +227,7 @@ class Frontend(mp.Process):
             )
         )
 
-        if self.to_insert_keyframe(iou, oc, new_frame):
+        if self.to_insert_keyframe(self.keyframes[-1], new_frame):
             self.add_keyframe(new_frame)
 
         return new_frame.pose()
