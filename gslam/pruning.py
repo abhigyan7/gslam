@@ -69,6 +69,8 @@ class PruneByVisibility(PruningStrategy):
     def __init__(
         self,
     ):
+        self.window_size = 3
+        self.min_visibility = 3
         return
 
     @torch.no_grad()
@@ -77,7 +79,9 @@ class PruneByVisibility(PruningStrategy):
         splats: GaussianSplattingData,
         optimizers: Dict[str, Optimizer],
         visibility_counts: torch.Tensor,
+        latest_kf_age: int,
     ):
+        _newly_added_gaussians_mask = splats.ages < (latest_kf_age - self.window_size)
         raise NotImplementedError()
 
 

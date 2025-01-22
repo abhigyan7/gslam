@@ -21,6 +21,7 @@ class GaussianSplattingData(torch.nn.Module):
         opacities,  # alpha of gaussians
         colors,
         betas,  # log of something akin to variance of gaussians
+        ages,  # which frame each gaussian was inserted in
     ):  # RGB values of gaussians
         super().__init__()
         self.means: torch.nn.Parameter = torch.nn.Parameter(means)
@@ -29,6 +30,7 @@ class GaussianSplattingData(torch.nn.Module):
         self.opacities: torch.nn.Parameter = torch.nn.Parameter(opacities)
         self.colors: torch.nn.Parameter = torch.nn.Parameter(colors)
         self.betas: torch.nn.Parameter = torch.nn.Parameter(betas)
+        self.ages: torch.nn.Bufffer = self.register_buffer('ages', ages)
 
     def forward(
         self,
@@ -67,6 +69,7 @@ class GaussianSplattingData(torch.nn.Module):
             torch.tensor([], device=device),
             torch.tensor([], device=device),
             torch.tensor([], device=device),
+            torch.Longtensor([], device=device),
         )
 
     def clone(self) -> Self:
@@ -77,6 +80,7 @@ class GaussianSplattingData(torch.nn.Module):
             self.opacities.clone().detach(),
             self.colors.clone().detach(),
             self.betas.clone().detach(),
+            self.ages.clone(),
         )
 
     def as_dict(self):
