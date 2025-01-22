@@ -27,6 +27,8 @@ class MapConfig:
 
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
+
+    # TODO this isn't being used
     pose_optimization_regularization: float = 1e-6
 
     # 3dgs schedules means_lr, might need to look into this
@@ -67,9 +69,14 @@ class MapConfig:
     use_betas: bool = True
 
 
-def total_variation_loss(img: torch.Tensor) -> torch.Tensor:
-    tv_h = (img[..., 1:, :] - img[..., :-1, :]).pow(2).sum()
-    tv_w = (img[..., :, 1:] - img[..., :, :-1]).pow(2).sum()
+def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+    v_h = img[..., 1:, :] - img[..., :-1, :]
+    v_w = img[..., :, 1:] - img[..., :, :-1]
+    if mask is not None:
+        v_h = v_h * mask[..., 1:, :]
+        v_w = v_w * mask[..., :, 1:]
+    tv_h = (v_h).pow(2).sum()
+    tv_w = (v_w).pow(2).sum()
     return tv_h + tv_w
 
 
@@ -135,12 +142,12 @@ class Backend(torch.multiprocessing.Process):
             else self.conf.num_iters_initialization
         )
 
-        if self.conf.reset_opacity:
-            with torch.no_grad():
-                # reset opacities. not sure if no_grad is needed here.
-                self.splats.opacities.data = torch.logit(
-                    torch.sigmoid(self.splats.opacities.data) * 0.5
-                )
+        # if self.conf.reset_opacity:
+        #     with torch.no_grad():
+        #         # reset opacities. not sure if no_grad is needed here.
+        #         self.splats.opacities.data = torch.logit(
+        #             torch.sigmoid(self.splats.opacities.data) * 0.5
+        #         )
 
         for step in (pbar := tqdm.trange(n_iters)):
             window = self.optimization_window()
@@ -173,7 +180,7 @@ class Backend(torch.multiprocessing.Process):
             )
             betas_loss = self.splats.betas[visible_gaussians].mean()
             opacity_loss = self.splats.opacities[visible_gaussians].mean()
-            depth_loss = total_variation_loss(outputs.depthmaps)
+            depth_loss = total_variation_loss(outputs.depthmaps, outputs.alphas[..., 0])
             ssim_loss = 1.0 - fused_ssim(
                 outputs.rgbs.permute(0, 3, 1, 2),
                 gt_imgs.permute(0, 3, 1, 2),

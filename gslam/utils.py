@@ -71,17 +71,29 @@ def unvmap(func: Callable[[torch.Tensor], torch.Tensor]):
 
 
 @torch.no_grad()
-def false_colormap(image: torch.Tensor, near: float = None, far: float = None) -> Image:
+def false_colormap(
+    image: torch.Tensor,
+    near: float = None,
+    far: float = None,
+    mask: torch.Tensor = None,
+) -> Image:
     '''image in (H,W)'''
+    if mask is None:
+        valid_pixels = image
+    else:
+        valid_pixels = image[mask]
     if near is None:
-        near = image.min()
+        near = valid_pixels.min()
     if far is None:
-        far = image.max()
+        far = valid_pixels.max()
     image = (image - near) / (far - near + 1e-10)
     image = torch.nan_to_num(image, 0.0)
     image = image.clip(0.0, 1.0)
     image = (image * 255.0).long()
     image = torch.tensor(colormaps['turbo'].colors, device=image.device)[image]
     image = image * 255.0
+    if mask is not None:
+        # make invalid regions black
+        image[~mask] = 0.0
     image = image.detach().cpu().numpy().astype(np.uint8)
     return Image.fromarray(image)

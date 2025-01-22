@@ -144,7 +144,7 @@ class Frontend(mp.Process):
         # previous_keyframe = self.keyframes[-1]
         previous_frame = self.frames[-1]
 
-        # start with unit Rt difference?
+        # TODO apply a constant velocity propagation model
         new_frame.pose = Pose(previous_frame.pose()).to(self.conf.device)
 
         pose_optimizer = torch.optim.Adam(
@@ -218,7 +218,7 @@ class Frontend(mp.Process):
             self.output_dir / f'alphas/{len(self.frames):08}.jpg'
         )
 
-        false_colormap(rendered_depth).save(
+        false_colormap(rendered_depth, mask=outputs.alphas[0, ..., 0] > 0.0001).save(
             self.output_dir / f'depths/{len(self.frames):08}.jpg'
         )
 
