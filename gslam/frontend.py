@@ -18,6 +18,7 @@ from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import peak_signal_noise_ratio as psnr
 
 from .map import GaussianSplattingData
+from .rasterization import RasterizationOutput
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, Pose
 from .trajectory import evaluate_trajectories
@@ -43,6 +44,7 @@ class TrackingConfig:
 
     kf_cov = 0.9
     kf_oc = 0.4
+    kf_m = 0.08
 
 
 class Frontend(mp.Process):
@@ -91,11 +93,12 @@ class Frontend(mp.Process):
         os.makedirs(self.output_dir / 'betas', exist_ok=True)
         os.makedirs(self.output_dir / 'final_renders', exist_ok=True)
 
-    def to_insert_keyframe(self, previous_keyframe, new_frame):
-        # TODO implement insertion on pose diffs
-        # TODO implement insertion on the last keyframe insertion
-        #      being too far away in time
-        # TODO implement insertion on visibility criterion like they do in MonoGS
+    def to_insert_keyframe(
+        self,
+        previous_keyframe: Frame,
+        new_frame: Frame,
+        render_outputs: RasterizationOutput,
+    ):
         n_visible_gaussians = new_frame.visible_gaussians.sum()
         n_visible_gaussians_last_kf = previous_keyframe.visible_gaussians.sum()
 
@@ -110,7 +113,15 @@ class Frontend(mp.Process):
         _oc = intersection.sum() / (
             min(n_visible_gaussians.sum().item(), n_visible_gaussians_last_kf.sum())
         )
-        return iou < self.conf.kf_cov
+        if iou < self.conf.kf_cov:
+            return True
+        pose_difference = torch.linalg.inv(new_frame.pose()) @ previous_keyframe.pose()
+        if (
+            pose_difference[:3, 3].pow(2.0).sum().pow(0.5).item()
+            > self.conf.kf_m * render_outputs.depths.median()
+        ):
+            return True
+        return False
 
     def tracking_loss(
         self,
@@ -215,36 +226,16 @@ class Frontend(mp.Process):
             self.output_dir / f'betas/{len(self.frames):08}.jpg'
         )
 
-        self.frames.append(
-            Frame(
-                None,
-                new_frame.timestamp,
-                new_frame.camera.clone(),
-                Pose(new_frame.pose(), False),
-                new_frame.gt_pose,
-                None,
-                img_file=new_frame.img_file,
-            )
-        )
+        self.frames.append(new_frame.strip())
 
-        if self.to_insert_keyframe(self.keyframes[-1], new_frame):
+        if self.to_insert_keyframe(self.keyframes[-1], new_frame, outputs):
             self.add_keyframe(new_frame)
 
         return new_frame.pose()
 
     def request_initialization(self, frame: Frame):
-        self.frames.append(
-            Frame(
-                None,
-                frame.timestamp,
-                frame.camera.clone(),
-                Pose(frame.pose(), False),
-                frame.gt_pose,
-                None,
-                img_file=frame.img_file,
-            )
-        )
-        self.frozen_keyframes.append(frame)
+        self.frames.append(frame.strip())
+        self.frozen_keyframes.append(frame.strip())
         assert not self.initialized
         self.map_queue.put([FrontendMessage.REQUEST_INITIALIZE, deepcopy(frame)])
 
@@ -254,7 +245,7 @@ class Frontend(mp.Process):
         self.map_queue.put([FrontendMessage.ADD_KEYFRAME, deepcopy(frame)])
         self.waiting_for_sync = True
 
-    def sync_maps(self, splats, keyframes):
+    def sync_maps(self, splats: GaussianSplattingData, keyframes: list[Frame]):
         self.splats, self.keyframes = splats, keyframes
         return
 

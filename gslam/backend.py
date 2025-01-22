@@ -380,6 +380,8 @@ class Backend(torch.multiprocessing.Process):
             gt_pose=frame.gt_pose,
             gt_depth=frame.gt_depth,
             img_file=frame.img_file,
+            index=frame.index,
+            est_depths=outputs.depths,
         )
 
         self.keyframes.append(new_frame)

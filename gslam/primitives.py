@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 from torch.nn import functional as F
@@ -230,24 +230,32 @@ class Frame:
     camera: Camera
     pose: Pose
     gt_pose: torch.Tensor
-    gt_depth: torch.Tensor = field(default=None)
-    visible_gaussians: torch.Tensor = field(default=None)
+    index: int
+    gt_depth: torch.Tensor = None
     img_file: str = None
+    visible_gaussians: torch.Tensor = None
+    est_depths: torch.Tensor = None
 
     def to(self, device):
-        ret = Frame(
-            timestamp=self.timestamp,
-            camera=self.camera.to(device),
-            pose=self.pose.to(device),
-            gt_pose=self.gt_pose.to(device),
-            img=self.img.to(device),
-            visible_gaussians=self.visible_gaussians.to(device)
-            if self.visible_gaussians is not None
-            else None,
-            gt_depth=self.gt_depth.to(device) if self.gt_depth is not None else None,
-            img_file=self.img_file,
-        )
-        return ret
+        attributes = vars(self)
+        new_attributes = {
+            k: v.to(device) if hasattr(v, 'to') else v for k, v in attributes.items()
+        }
+        return Frame(**new_attributes)
+
+    def strip(self):
+        return Frame(
+            self.img,
+            self.timestamp,
+            self.camera,
+            Pose(self.pose()),
+            self.gt_pose,
+            self.index,
+            None,
+            self.img_file,
+            None,
+            None,
+        ).to(self.img.device)
 
 
 @dataclass
