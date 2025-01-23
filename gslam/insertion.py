@@ -44,6 +44,9 @@ class InsertionStrategy(ABC):
             # might have to allow some parameters to not have optimizers
             # for stuff like visibility counts, they aren't trainable
             # but we might need them for regularization
+            if splat_param_name not in optimizers:
+                splats.__setattr__(splat_param_name, new_splat_param)
+                continue
             optimizer = optimizers[splat_param_name]
             for i in range(len(optimizer.param_groups)):
                 param_state = optimizer.state[splat_param]
@@ -58,6 +61,7 @@ class InsertionStrategy(ABC):
                 optimizer.state[new_splat_param] = param_state
                 optimizer.param_groups[i]['params'] = [new_splat_param]
             splats.__setattr__(splat_param_name, new_splat_param)
+
         return N
 
     @torch.no_grad()
@@ -213,6 +217,7 @@ class InsertFromDepthMap(InsertionStrategy):
             ),
             'quats': torch.rand((N, 4), device=device),
             'betas': torch.log(torch.full((N,), self.initial_beta, device=device)),
+            'ages': torch.full((N,), frame.index, device=device).long(),
         }
 
         self._add_new_splats(splats, optimizers, new_params)

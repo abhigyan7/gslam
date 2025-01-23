@@ -13,7 +13,7 @@ from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, Pose
-from .pruning import PruneLowOpacity, PruneLargeGaussians
+from .pruning import PruneLowOpacity, PruneLargeGaussians, PruneByVisibility
 from .rasterization import RasterizationOutput
 from .utils import create_batch
 
@@ -50,13 +50,13 @@ class MapConfig:
 
     device: str = 'cuda:0'
 
-    optim_window_last_n_keyframes: int = 5
-    optim_window_random_keyframes: int = 5
+    optim_window_last_n_keyframes: int = 5  # MonoGS does 8
+    optim_window_random_keyframes: int = 2
 
     num_iters_mapping: int = 150
     num_iters_initialization: int = 300
 
-    opacity_pruning_threshold: float = 0.6
+    opacity_pruning_threshold: float = 0.7
     size_pruning_threshold: int = 256
 
     reset_opacity: bool = False
@@ -67,6 +67,10 @@ class MapConfig:
     num_iters_final: int = 200
 
     use_betas: bool = True
+
+    min_visibility: int = 3
+    visibility_pruning_window_size: int = 3
+    enable_visibility_pruning: bool = True
 
 
 def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
@@ -106,6 +110,9 @@ class Backend(torch.multiprocessing.Process):
             0.0002,
             0.01,
         )
+        self.pruning_visibility = PruneByVisibility(
+            self.conf.visibility_pruning_window_size, self.conf.min_visibility
+        )
         self.initialized: bool = False
 
         if not self.conf.use_betas:
@@ -135,12 +142,13 @@ class Backend(torch.multiprocessing.Process):
         )
         return window
 
-    def optimize_map(self):
-        n_iters = (
-            self.conf.num_iters_mapping
-            if self.initialized
-            else self.conf.num_iters_initialization
-        )
+    def optimize_map(self, n_iters: int = None):
+        if n_iters is None:
+            n_iters = (
+                self.conf.num_iters_mapping
+                if self.initialized
+                else self.conf.num_iters_initialization
+            )
 
         # if self.conf.reset_opacity:
         #     with torch.no_grad():
@@ -149,8 +157,12 @@ class Backend(torch.multiprocessing.Process):
         #             torch.sigmoid(self.splats.opacities.data) * 0.5
         #         )
 
+        visibility_counts = torch.zeros_like(self.splats.opacities).long()
+        window_size = -1
+
         for step in (pbar := tqdm.trange(n_iters)):
             window = self.optimization_window()
+            window_size = len(window)
             cameras = [x.camera for x in window]
             poses = torch.nn.ModuleList([x.pose for x in window])
             gt_imgs = create_batch(window, lambda x: x.img)
@@ -168,7 +180,7 @@ class Backend(torch.multiprocessing.Process):
                 inv_betas = outputs.betas.pow(-1.0).unsqueeze(-1)
             photometric_loss = ((outputs.rgbs - gt_imgs) * inv_betas).square().mean()
 
-            visible_gaussians = outputs.radii.sum(dim=0) > 0
+            visible_gaussians = outputs.n_touched.sum(dim=0) > 0
             mean_scales = (
                 self.splats.scales[visible_gaussians]
                 .mean(dim=1, keepdim=True)
@@ -199,17 +211,17 @@ class Backend(torch.multiprocessing.Process):
 
             total_loss.backward()
 
-            if step in (n_iters // 3, 2 * n_iters // 3):
-                self.insertion_3dgs.step(
-                    self.splats,
-                    self.splat_optimizers,
-                    outputs,
-                    None,
-                    None,
-                )
+            # if step in (n_iters // 3, 2 * n_iters // 3):
+            #     self.insertion_3dgs.step(
+            #         self.splats,
+            #         self.splat_optimizers,
+            #         outputs,
+            #         None,
+            #         None,
+            #     )
 
             desc = (
-                f"[Mapping] loss={photometric_loss.item():.3f}, "
+                f"[Mapping] keyframe {len(self.keyframes)} loss={photometric_loss.item():.3f}, "
                 f"n_splats={self.splats.means.shape[0]:07}, "
                 f"mean_beta={self.splats.betas.exp().mean().item():.3f}"
             )
@@ -217,21 +229,45 @@ class Backend(torch.multiprocessing.Process):
 
             self.step_all_optimizers()
 
-            self.pruning_size.step(
+            visibility_counts += (outputs.n_touched.sum(dim=0) > 0).long()
+
+        gaussians_max_screen_size = torch.max(outputs.radii, axis=0).values
+        per_gaussian_stats = [gaussians_max_screen_size]
+
+        # visibility_pruning
+        latest_kf_age = self.keyframes[-1].index
+        if self.conf.enable_visibility_pruning and (
+            window_size >= self.conf.optim_window_last_n_keyframes
+        ):
+            self.pruning_visibility.step(
                 self.splats,
                 self.splat_optimizers,
-                outputs.radii,
+                visibility_counts,
+                latest_kf_age,
+                per_gaussian_stats,
             )
 
-            if step in (n_iters // 2, n_iters):
-                self.pruning_opacity.step(self.splats, self.splat_optimizers)
+        # size pruning
+        self.pruning_size.step(
+            self.splats,
+            self.splat_optimizers,
+            per_gaussian_stats[0],
+        )
+
+        # opacity pruning
+        self.pruning_opacity.step(
+            self.splats,
+            self.splat_optimizers,
+        )
 
         outputs = self.splats(
             [self.keyframes[-1].camera],
             [self.keyframes[-1].pose],
         )
 
-        self.keyframes[-1].visible_gaussians = (outputs.radii[0] > 0).detach()
+        self.keyframes[-1].visible_gaussians = (
+            outputs.n_touched.sum(dim=0) > 0
+        ).detach()
         return
 
     def optimize_final(self):
@@ -419,8 +455,8 @@ class Backend(torch.multiprocessing.Process):
                     self.optimize_map()
                     self.sync_with_frontend()
                 case None:
-                    print('Running final optimization.')
-                    self.optimize_final()
+                    print('Not running final optimization.')
+                    # self.optimize_final()
                     break
                 case message_from_frontend:
                     self.logger.warning(f"Unknown {message_from_frontend}")

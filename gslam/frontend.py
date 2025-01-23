@@ -116,10 +116,11 @@ class Frontend(mp.Process):
         if iou < self.conf.kf_cov:
             return True
         pose_difference = torch.linalg.inv(new_frame.pose()) @ previous_keyframe.pose()
-        if (
-            pose_difference[:3, 3].pow(2.0).sum().pow(0.5).item()
-            > self.conf.kf_m * render_outputs.depths.median()
-        ):
+        translation = pose_difference[:3, 3].pow(2.0).sum().pow(0.5).item()
+        median_depth = render_outputs.depthmaps[
+            render_outputs.alphas[..., 0] > 0.1
+        ].median()
+        if translation > self.conf.kf_m * median_depth:
             return True
         return False
 
@@ -173,7 +174,7 @@ class Frontend(mp.Process):
             )
 
             pbar.set_description(
-                f"Tracking frame {len(self.frames)}, loss: {loss.item():.3f}"
+                f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
             )
 
         with torch.no_grad():
@@ -184,7 +185,14 @@ class Frontend(mp.Process):
             rendered_depth = outputs.depthmaps[0]
             rendered_beta = outputs.betas[0]
 
-            new_frame.visible_gaussians = outputs.radii > 0
+            new_frame.visible_gaussians = outputs.n_touched.sum(dim=0) > 0
+
+            last_kf_outputs = self.splats(
+                [self.keyframes[-1].camera], [self.keyframes[-1].pose]
+            )
+            self.keyframes[-1].visible_gaussians = (
+                last_kf_outputs.n_touched.sum(dim=0) > 0
+            )
 
         rr.log(
             '/tracking/psnr',
@@ -218,7 +226,7 @@ class Frontend(mp.Process):
             self.output_dir / f'alphas/{len(self.frames):08}.jpg'
         )
 
-        false_colormap(rendered_depth, mask=outputs.alphas[0, ..., 0] > 0.0001).save(
+        false_colormap(rendered_depth, mask=outputs.alphas[0, ..., 0] > 0.3).save(
             self.output_dir / f'depths/{len(self.frames):08}.jpg'
         )
 

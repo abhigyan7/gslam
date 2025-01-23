@@ -11,7 +11,15 @@ from .rasterization import rasterization, RasterizationOutput
 
 # consider the implications of all these structs being torch modules
 class GaussianSplattingData(torch.nn.Module):
-    _per_splat_params = ['means', 'quats', 'scales', 'opacities', 'colors', 'betas']
+    _per_splat_params = [
+        'means',
+        'quats',
+        'scales',
+        'opacities',
+        'colors',
+        'betas',
+        'ages',
+    ]
 
     def __init__(
         self,
@@ -30,7 +38,7 @@ class GaussianSplattingData(torch.nn.Module):
         self.opacities: torch.nn.Parameter = torch.nn.Parameter(opacities)
         self.colors: torch.nn.Parameter = torch.nn.Parameter(colors)
         self.betas: torch.nn.Parameter = torch.nn.Parameter(betas)
-        self.ages: torch.nn.Bufffer = self.register_buffer('ages', ages)
+        self.ages: torch.nn.Parameter = torch.nn.Parameter(ages, requires_grad=False)
 
     def forward(
         self,
@@ -69,7 +77,7 @@ class GaussianSplattingData(torch.nn.Module):
             torch.tensor([], device=device),
             torch.tensor([], device=device),
             torch.tensor([], device=device),
-            torch.Longtensor([], device=device),
+            torch.tensor([], device=device).long(),
         )
 
     def clone(self) -> Self:
@@ -92,5 +100,6 @@ class GaussianSplattingData(torch.nn.Module):
                 'opacities': self.opacities,
                 'colors': self.colors,
                 'betas': self.betas,
+                'ages': self.ages,
             }
         )
