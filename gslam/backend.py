@@ -1,9 +1,10 @@
+from collections import defaultdict
 from dataclasses import dataclass
 import logging
 import random
 import threading
 from copy import deepcopy
-from typing import Dict, List
+from typing import Dict
 
 from fused_ssim import fused_ssim
 import torch
@@ -98,7 +99,7 @@ class Backend(torch.multiprocessing.Process):
         self.frontend_queue = frontend_queue
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel("DEBUG")
-        self.keyframes: List[Frame] = []
+        self.keyframes: dict[int, Frame] = dict()
         self.backend_done_event = backend_done_event
         self.splats = GaussianSplattingData.empty()
         self.pruning_opacity = PruneLowOpacity(self.conf.opacity_pruning_threshold)
@@ -118,7 +119,9 @@ class Backend(torch.multiprocessing.Process):
         if not self.conf.use_betas:
             self.conf.betas_regularization_weight = 0.0
 
-    def optimization_window(self):
+        self.pose_graph = defaultdict(set)
+
+    def optimization_window(self) -> list[Frame]:
         window_size_total = (
             self.conf.optim_window_last_n_keyframes
             + self.conf.optim_window_random_keyframes
@@ -131,15 +134,14 @@ class Backend(torch.multiprocessing.Process):
             0, window_size_total - n_last_keyframes_to_choose
         )
 
-        window = []
-
-        window = self.keyframes[-n_last_keyframes_to_choose:]
+        window = list(self.keyframes.keys())[-n_last_keyframes_to_choose:]
         window.extend(
             random.sample(
-                self.keyframes[:-n_last_keyframes_to_choose],
+                list(self.keyframes.keys())[:-n_last_keyframes_to_choose],
                 n_random_keyframes_to_choose,
             )
         )
+        window = [self.keyframes[i] for i in window]
         return window
 
     def optimize_map(self, n_iters: int = None):
@@ -235,7 +237,7 @@ class Backend(torch.multiprocessing.Process):
         per_gaussian_stats = [gaussians_max_screen_size]
 
         # visibility_pruning
-        latest_kf_age = self.keyframes[-1].index
+        latest_kf_age = list(self.keyframes.keys())[-1]
         if self.conf.enable_visibility_pruning and (
             window_size >= self.conf.optim_window_last_n_keyframes
         ):
@@ -260,14 +262,14 @@ class Backend(torch.multiprocessing.Process):
             self.splat_optimizers,
         )
 
+        last_kf = list(self.keyframes.values())[-1]
+
         outputs = self.splats(
-            [self.keyframes[-1].camera],
-            [self.keyframes[-1].pose],
+            [last_kf.camera],
+            [last_kf.pose],
         )
 
-        self.keyframes[-1].visible_gaussians = (
-            outputs.n_touched.sum(dim=0) > 0
-        ).detach()
+        last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
         return
 
     def optimize_final(self):
@@ -370,7 +372,7 @@ class Backend(torch.multiprocessing.Process):
 
     def initialize(self, frame: Frame):
         frame = frame.to(self.conf.device)
-        self.keyframes = [frame]
+        self.keyframes[frame.index] = frame
 
         self.splats = GaussianSplattingData.empty().to(self.conf.device)
         self.initialize_optimizers()
@@ -427,7 +429,7 @@ class Backend(torch.multiprocessing.Process):
             est_depths=outputs.depths,
         )
 
-        self.keyframes.append(new_frame)
+        self.keyframes[new_frame.index] = new_frame
         self.pose_optimizer.add_param_group(
             {
                 'params': new_frame.pose.dt,

@@ -62,7 +62,7 @@ class Frontend(mp.Process):
         self.conf: TrackingConfig = conf
         self.map_queue: mp.Queue = backend_queue
         self.queue: mp.Queue[int] = frontend_queue
-        self.keyframes: List[Frame] = []
+        self.keyframes: dict[int, Frame] = dict()
 
         self.splats = GaussianSplattingData.empty()
 
@@ -187,13 +187,6 @@ class Frontend(mp.Process):
 
             new_frame.visible_gaussians = outputs.n_touched.sum(dim=0) > 0
 
-            last_kf_outputs = self.splats(
-                [self.keyframes[-1].camera], [self.keyframes[-1].pose]
-            )
-            self.keyframes[-1].visible_gaussians = (
-                last_kf_outputs.n_touched.sum(dim=0) > 0
-            )
-
         rr.log(
             '/tracking/psnr',
             rr.Scalar(
@@ -236,7 +229,8 @@ class Frontend(mp.Process):
 
         self.frames.append(new_frame.strip())
 
-        if self.to_insert_keyframe(self.keyframes[-1], new_frame, outputs):
+        last_kf = list(self.keyframes.values())[-1]
+        if self.to_insert_keyframe(last_kf, new_frame, outputs):
             self.add_keyframe(new_frame)
 
         return new_frame.pose()
@@ -253,7 +247,7 @@ class Frontend(mp.Process):
         self.map_queue.put([FrontendMessage.ADD_KEYFRAME, deepcopy(frame)])
         self.waiting_for_sync = True
 
-    def sync_maps(self, splats: GaussianSplattingData, keyframes: list[Frame]):
+    def sync_maps(self, splats: GaussianSplattingData, keyframes: dict[int, Frame]):
         self.splats, self.keyframes = splats, keyframes
         return
 
@@ -285,7 +279,7 @@ class Frontend(mp.Process):
         )
 
     def evaluate_reconstruction(self):
-        for i, kf in enumerate(self.keyframes):
+        for i, kf in enumerate(self.keyframes.values()):
             outputs = self.splats(
                 [kf.camera],
                 [kf.pose],
@@ -335,7 +329,7 @@ class Frontend(mp.Process):
         fig, ates = evaluate_trajectories(
             {
                 'frozen': self.frozen_keyframes,
-                'optimized': self.keyframes,
+                'optimized': self.keyframes.values(),
                 'tracking': self.frames,
             }
         )
@@ -426,7 +420,7 @@ class Frontend(mp.Process):
             frame = frame.to(self.conf.device)
             if not self.initialized:
                 self.request_initialization(frame)
-                self.keyframes.append(frame)
+                self.keyframes[frame.index] = frame
                 self.waiting_for_sync = True
             else:
                 self.track(frame)
