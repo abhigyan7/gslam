@@ -247,7 +247,7 @@ def rasterization(
         colors = torch.cat((colors, betas[..., None]), dim=-1)
         if backgrounds is not None:
             backgrounds = torch.cat(
-                [backgrounds, torch.zeros(C, 1, device=backgrounds.device)], dim=-1
+                [backgrounds, torch.full((C,), 1.0, device=backgrounds.device)], dim=-1
             )
         betas_index = colors.shape[-1] - 1
 

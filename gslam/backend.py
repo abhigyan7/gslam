@@ -199,7 +199,7 @@ class Backend(torch.multiprocessing.Process):
                 padding='valid',
             )
             total_loss = (
-                photometric_loss
+                (1.0 - self.conf.ssim_weight) * photometric_loss
                 + self.conf.isotropic_regularization_weight * isotropic_loss
                 + self.conf.opacity_regularization_weight * opacity_loss
                 + self.conf.betas_regularization_weight * betas_loss
