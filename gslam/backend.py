@@ -18,7 +18,7 @@ from .pose_graph import add_constraint
 from .primitives import Frame, Pose
 from .pruning import PruneLowOpacity, PruneLargeGaussians, PruneByVisibility
 from .rasterization import RasterizationOutput
-from .utils import create_batch, ForkedPdb, torch_to_pil
+from .utils import create_batch, ForkedPdb
 
 forked_pdb = ForkedPdb()
 
@@ -283,12 +283,12 @@ class Backend(torch.multiprocessing.Process):
     def optimize_final(self):
         n_iters = self.conf.num_iters_final
 
-        with torch.no_grad():
-            # reset opacities. not sure if no_grad is needed here.
-            self.splats.opacities.data = torch.logit(
-                torch.sigmoid(self.splats.opacities.data) * 0.0
-                + self.conf.opacity_after_reset
-            )
+        # with torch.no_grad():
+        #     # reset opacities. not sure if no_grad is needed here.
+        #     self.splats.opacities.data = torch.logit(
+        #         torch.sigmoid(self.splats.opacities.data) * 0.0
+        #         + self.conf.opacity_after_reset
+        #     )
         for step in (pbar := tqdm.trange(n_iters)):
             window = random.sample(
                 sorted(self.keyframes.keys()), min(10, len(self.keyframes))
@@ -359,10 +359,6 @@ class Backend(torch.multiprocessing.Process):
                 )
                 result = result.squeeze(0).permute((1, 2, 0))
 
-                torch_to_pil(result).save('warp.png')
-                torch_to_pil(self.keyframes[kf_1].img).save('hunuparne.png')
-                torch_to_pil(self.keyframes[kf_2].img).save('orig.png')
-
                 # DONE filter warp to be non-degen
                 # for now, filtering out points that are outside of the image bounds
                 normalized_warps_v = normalized_warps[0, ..., 0]
@@ -383,11 +379,11 @@ class Backend(torch.multiprocessing.Process):
 
             loss.backward()
 
-            if ((step + 1) % (n_iters // 3)) == 0:
-                self.pruning_opacity.step(self.splats, self.splat_optimizers)
+            # if ((step + 1) % (n_iters // 3)) == 0:
+            #     self.pruning_opacity.step(self.splats, self.splat_optimizers)
 
             desc = (
-                f"[Mapping] loss={loss.item():.3f}, "
+                f"[Final Optimization] loss={loss.item():.3f}, "
                 f"n_splats={self.splats.means.shape[0]:07}"
             )
             pbar.set_description(desc)
