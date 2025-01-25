@@ -217,70 +217,6 @@ class Backend(torch.multiprocessing.Process):
                 + self.conf.ssim_weight * ssim_loss
             )
 
-            if self.conf.enable_pgo and len(self.pose_graph) > 0:
-                # DONE sample a constraint from the pose graph
-
-                kf_1 = random.sample(sorted(self.pose_graph.keys()), 1)[0]
-                kf_2 = random.sample(sorted(self.pose_graph[kf_1]), 1)[0]
-
-                outputs: RasterizationOutput = self.splats(
-                    [self.keyframes[kf].camera for kf in (kf_1, kf_2)],
-                    [self.keyframes[kf].pose for kf in (kf_1, kf_2)],
-                    render_depth=True,
-                )
-
-                _, H, W, _ = outputs.rgbs.shape
-
-                # DONE create warp
-                warps = warp(
-                    self.keyframes[kf_1],
-                    self.keyframes[kf_2],
-                    outputs.rgbs[0],
-                    outputs.depthmaps[0],
-                )
-
-                normalized_warps = (
-                    warps / torch.tensor([W, H], device=warps.device).float()
-                )
-                normalized_warps *= 2.0
-                normalized_warps -= 1.0
-
-                normalized_warps = normalized_warps.unsqueeze(0)
-
-                normalized_warps = normalized_warps.permute((0, 2, 1, 3))
-                # DONE sample old image as per warp
-                result = F.grid_sample(
-                    outputs.rgbs[1].permute((2, 0, 1)).unsqueeze(0),
-                    normalized_warps,
-                    padding_mode='zeros',
-                    align_corners=False,
-                )
-                result = result.squeeze(0).permute((1, 2, 0))
-
-                torch_to_pil(result).save('warp.png')
-                torch_to_pil(self.keyframes[kf_1].img).save('hunuparne.png')
-                torch_to_pil(self.keyframes[kf_2].img).save('orig.png')
-
-                # DONE filter warp to be non-degen
-                # for now, filtering out points that are outside of the image bounds
-                normalized_warps_v = normalized_warps[0, ..., 0]
-                normalized_warps_h = normalized_warps[0, ..., 1]
-
-                keep_mask = (
-                    (normalized_warps_v < 1.0)
-                    & (normalized_warps_h < 1.0)
-                    & (normalized_warps_v > -1.0)
-                    & (normalized_warps_h > -1.0)
-                )
-                result = result[keep_mask, ...]
-
-                # DONE calculate huber loss
-                gt = self.keyframes[kf_1].img[keep_mask, ...]
-                loss = F.huber_loss(result, gt)
-
-                # DONE add to the overall loss
-                total_loss += loss * self.conf.pgo_loss_weight
-
             # outputs.means2d.retain_grad()
 
             total_loss.backward()
@@ -354,7 +290,14 @@ class Backend(torch.multiprocessing.Process):
                 + self.conf.opacity_after_reset
             )
         for step in (pbar := tqdm.trange(n_iters)):
-            window = random.sample(self.keyframes, min(10, len(self.keyframes)))
+            window = random.sample(
+                sorted(self.keyframes.keys()), min(10, len(self.keyframes))
+            )
+            window = [self.keyframes[i] for i in window]
+            cameras = [x.camera for x in window]
+            poses = torch.nn.ModuleList([x.pose for x in window])
+            gt_imgs = create_batch(window, lambda x: x.img)
+
             cameras = [x.camera for x in window]
             poses = torch.nn.ModuleList([x.pose for x in window])
             gt_imgs = create_batch(window, lambda x: x.img)
@@ -375,6 +318,69 @@ class Backend(torch.multiprocessing.Process):
                 self.conf.ssim_weight * ssim_loss
                 + (1.0 - self.conf.ssim_weight) * photometric_loss
             )
+
+            if self.conf.enable_pgo and len(self.pose_graph) > 0:
+                # DONE sample a constraint from the pose graph
+
+                kf_1 = random.sample(sorted(self.pose_graph.keys()), 1)[0]
+                kf_2 = random.sample(sorted(self.pose_graph[kf_1]), 1)[0]
+
+                outputs: RasterizationOutput = self.splats(
+                    [self.keyframes[kf].camera for kf in (kf_1, kf_2)],
+                    [self.keyframes[kf].pose for kf in (kf_1, kf_2)],
+                    render_depth=True,
+                )
+
+                _, H, W, _ = outputs.rgbs.shape
+
+                # DONE create warp
+                warps = warp(
+                    self.keyframes[kf_1],
+                    self.keyframes[kf_2],
+                    outputs.rgbs[0],
+                    outputs.depthmaps[0],
+                )
+
+                normalized_warps = (
+                    warps / torch.tensor([W, H], device=warps.device).float()
+                )
+                normalized_warps *= 2.0
+                normalized_warps -= 1.0
+
+                normalized_warps = normalized_warps.unsqueeze(0)
+
+                normalized_warps = normalized_warps.permute((0, 2, 1, 3))
+                # DONE sample old image as per warp
+                result = F.grid_sample(
+                    outputs.rgbs[1].permute((2, 0, 1)).unsqueeze(0),
+                    normalized_warps,
+                    padding_mode='zeros',
+                    align_corners=False,
+                )
+                result = result.squeeze(0).permute((1, 2, 0))
+
+                torch_to_pil(result).save('warp.png')
+                torch_to_pil(self.keyframes[kf_1].img).save('hunuparne.png')
+                torch_to_pil(self.keyframes[kf_2].img).save('orig.png')
+
+                # DONE filter warp to be non-degen
+                # for now, filtering out points that are outside of the image bounds
+                normalized_warps_v = normalized_warps[0, ..., 0]
+                normalized_warps_h = normalized_warps[0, ..., 1]
+
+                keep_mask = (
+                    (normalized_warps_v < 1.0)
+                    & (normalized_warps_h < 1.0)
+                    & (normalized_warps_v > -1.0)
+                    & (normalized_warps_h > -1.0)
+                )
+                result = result[keep_mask, ...]
+                gt = self.keyframes[kf_1].img[keep_mask, ...]
+
+                # DONE calculate huber loss
+                # DONE add to the overall loss
+                loss += F.huber_loss(result, gt) * self.conf.pgo_loss_weight
+
             loss.backward()
 
             if ((step + 1) % (n_iters // 3)) == 0:
@@ -531,8 +537,9 @@ class Backend(torch.multiprocessing.Process):
                     self.optimize_map()
                     self.sync_with_frontend()
                 case None:
-                    print('Not running final optimization.')
-                    # self.optimize_final()
+                    print('Running final optimization.')
+                    self.optimize_final()
+                    self.sync_with_frontend()
                     break
                 case message_from_frontend:
                     self.logger.warning(f"Unknown {message_from_frontend}")
