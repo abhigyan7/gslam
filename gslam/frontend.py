@@ -142,12 +142,18 @@ class Frontend(mp.Process):
                 assert_never(self.conf.photometric_loss)
 
     def track(self, new_frame: Frame):
-        # previous_keyframe = self.keyframes[-1]
-        previous_frame = self.frames[-1]
+        with torch.no_grad():
+            if len(self.frames) < 2:
+                previous_frame = self.frames[-1]
+                pose = previous_frame.pose()
+            else:
+                # constant velocity propagation model
+                d_pose = self.frames[-1].pose() @ torch.linalg.inv(
+                    self.frames[-2].pose()
+                )
+                pose = self.frames[-1].pose() @ d_pose
 
-        # TODO apply a constant velocity propagation model
-        new_frame.pose = Pose(previous_frame.pose()).to(self.conf.device)
-
+        new_frame.pose = Pose(pose.detach()).to(self.conf.device)
         pose_optimizer = torch.optim.Adam(
             [
                 {'params': [new_frame.pose.dR], 'lr': self.conf.pose_optim_lr_rotation},
@@ -157,6 +163,8 @@ class Frontend(mp.Process):
                 },
             ]
         )
+
+        last_loss = float('inf')
 
         for i in (pbar := tqdm.trange(self.conf.num_tracking_iters)):
             pose_optimizer.zero_grad()
@@ -176,6 +184,12 @@ class Frontend(mp.Process):
             pbar.set_description(
                 f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
             )
+
+            if 0 < ((last_loss - loss) / loss) < 0.0001:
+                # we've 'converged'!
+                break
+
+            last_loss = loss.item()
 
         with torch.no_grad():
             outputs = self.splats(
