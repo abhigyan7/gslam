@@ -42,7 +42,7 @@ class TrackingConfig:
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
 
-    kf_cov = 0.8
+    kf_cov = 0.7
     kf_oc = 0.4
     kf_m = 0.08
 
@@ -92,6 +92,7 @@ class Frontend(mp.Process):
         os.makedirs(self.output_dir / 'depths', exist_ok=True)
         os.makedirs(self.output_dir / 'betas', exist_ok=True)
         os.makedirs(self.output_dir / 'final_renders', exist_ok=True)
+        os.makedirs(self.output_dir / 'final_depths', exist_ok=True)
 
     def to_insert_keyframe(
         self,
@@ -316,10 +317,14 @@ class Frontend(mp.Process):
             outputs = self.splats(
                 [f.camera],
                 [f.pose],
+                render_depth=True,
             )
             torch_to_pil(outputs.rgbs[0]).save(
                 self.output_dir / f'final_renders/{i:08}.jpg'
             )
+            false_colormap(
+                outputs.depthmaps[0], mask=outputs.alphas[0, ..., 0] > 0.3
+            ).save(self.output_dir / f'final_depths/{i:08}.jpg')
 
             if f.img_file is None:
                 continue
@@ -397,6 +402,9 @@ class Frontend(mp.Process):
         )
         os.system(
             f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_renders/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final_renders.mp4"}'
+        )
+        os.system(
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_depths/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final_depths.mp4"}'
         )
 
     @rr.shutdown_at_exit

@@ -1,5 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass
+from itertools import combinations
 import logging
 import random
 import threading
@@ -80,6 +81,7 @@ class MapConfig:
     # pose graph optimization
     enable_pgo: bool = False
     pgo_loss_weight: float = 1.0
+    kf_cov: float = 0.7
 
 
 def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
@@ -282,6 +284,9 @@ class Backend(torch.multiprocessing.Process):
 
     def optimize_final(self):
         n_iters = self.conf.num_iters_final
+
+        if self.conf.enable_pgo:
+            self.add_pgo_constraints()
 
         # with torch.no_grad():
         #     # reset opacities. not sure if no_grad is needed here.
@@ -518,6 +523,46 @@ class Backend(torch.multiprocessing.Process):
         )
 
         add_constraint(self.pose_graph, *(list(self.keyframes.keys())[-2:]))
+
+    def to_insert_keyframe(
+        self,
+        previous_keyframe: Frame,
+        new_frame: Frame,
+    ):
+        n_visible_gaussians = new_frame.visible_gaussians.sum()
+        n_visible_gaussians_last_kf = previous_keyframe.visible_gaussians.sum()
+
+        intersection = torch.logical_and(
+            new_frame.visible_gaussians, previous_keyframe.visible_gaussians
+        )
+        union = torch.logical_or(
+            new_frame.visible_gaussians, previous_keyframe.visible_gaussians
+        )
+
+        iou = intersection.sum() / union.sum()
+        _oc = intersection.sum() / (
+            min(n_visible_gaussians.sum().item(), n_visible_gaussians_last_kf.sum())
+        )
+        return iou > self.conf.kf_cov
+
+    def add_pgo_constraints(
+        self,
+    ):
+        for kf in tqdm.tqdm(
+            self.keyframes.values(), 'Rendering to calculate covisibility'
+        ):
+            outputs = self.splats(
+                [kf.camera],
+                [kf.pose],
+            )
+
+            kf.visible_gaussians = outputs.n_touched.sum(dim=0) > 0
+
+        for i, j in combinations(sorted(self.keyframes), 2):
+            if j in self.pose_graph[i]:
+                continue
+            if self.to_insert_keyframe(self.keyframes[i], self.keyframes[j]):
+                add_constraint(self.pose_graph, i, j)
 
     def run(self):
         while True:
