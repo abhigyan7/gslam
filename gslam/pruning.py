@@ -103,6 +103,7 @@ class PruneByVisibility(PruningStrategy):
         n_pruned = self._prune_using_mask(
             splats, optimizers, keep_mask, per_gaussian_params
         )
+        print(f'Pruned {n_pruned} gaussians by visibility.')
         return n_pruned
 
 

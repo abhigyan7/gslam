@@ -75,7 +75,7 @@ class TumRGB:
             [
                 [525.0, 0.0, 319.5],
                 [0.0, 525.5, 239.5],
-                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
             ]
         ).cuda()
         camera = Camera(Ks, height, width)

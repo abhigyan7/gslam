@@ -279,7 +279,9 @@ class Frontend(mp.Process):
         )
 
     def evaluate_reconstruction(self):
-        for i, kf in enumerate(self.keyframes.values()):
+        for i, kf in enumerate(
+            tqdm.tqdm(self.keyframes.values(), 'Rendering all keyframes')
+        ):
             outputs = self.splats(
                 [kf.camera],
                 [kf.pose],
@@ -296,7 +298,7 @@ class Frontend(mp.Process):
         psnrs = []
         ssims = []
 
-        for i, f in enumerate(self.frames):
+        for i, f in enumerate(tqdm.tqdm(self.frames, 'Rendering all frames')):
             outputs = self.splats(
                 [f.camera],
                 [f.pose],

@@ -8,15 +8,19 @@ from typing import Dict
 
 from fused_ssim import fused_ssim
 import torch
+import torch.nn.functional as F
 import tqdm
 
 from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
+from .pose_graph import add_constraint
 from .primitives import Frame, Pose
 from .pruning import PruneLowOpacity, PruneLargeGaussians, PruneByVisibility
 from .rasterization import RasterizationOutput
-from .utils import create_batch
+from .utils import create_batch, ForkedPdb, torch_to_pil
+
+forked_pdb = ForkedPdb()
 
 
 @dataclass
@@ -51,7 +55,7 @@ class MapConfig:
 
     device: str = 'cuda:0'
 
-    optim_window_last_n_keyframes: int = 5  # MonoGS does 8
+    optim_window_last_n_keyframes: int = 8  # MonoGS does 8
     optim_window_random_keyframes: int = 2
 
     num_iters_mapping: int = 150
@@ -72,6 +76,10 @@ class MapConfig:
     min_visibility: int = 3
     visibility_pruning_window_size: int = 3
     enable_visibility_pruning: bool = True
+
+    # pose graph optimization
+    enable_pgo: bool = False
+    pgo_loss_weight: float = 1.0
 
 
 def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
@@ -209,7 +217,71 @@ class Backend(torch.multiprocessing.Process):
                 + self.conf.ssim_weight * ssim_loss
             )
 
-            outputs.means2d.retain_grad()
+            if self.conf.enable_pgo and len(self.pose_graph) > 0:
+                # DONE sample a constraint from the pose graph
+
+                kf_1 = random.sample(sorted(self.pose_graph.keys()), 1)[0]
+                kf_2 = random.sample(sorted(self.pose_graph[kf_1]), 1)[0]
+
+                outputs: RasterizationOutput = self.splats(
+                    [self.keyframes[kf].camera for kf in (kf_1, kf_2)],
+                    [self.keyframes[kf].pose for kf in (kf_1, kf_2)],
+                    render_depth=True,
+                )
+
+                _, H, W, _ = outputs.rgbs.shape
+
+                # DONE create warp
+                warps = warp(
+                    self.keyframes[kf_1],
+                    self.keyframes[kf_2],
+                    outputs.rgbs[0],
+                    outputs.depthmaps[0],
+                )
+
+                normalized_warps = (
+                    warps / torch.tensor([W, H], device=warps.device).float()
+                )
+                normalized_warps *= 2.0
+                normalized_warps -= 1.0
+
+                normalized_warps = normalized_warps.unsqueeze(0)
+
+                normalized_warps = normalized_warps.permute((0, 2, 1, 3))
+                # DONE sample old image as per warp
+                result = F.grid_sample(
+                    outputs.rgbs[1].permute((2, 0, 1)).unsqueeze(0),
+                    normalized_warps,
+                    padding_mode='zeros',
+                    align_corners=False,
+                )
+                result = result.squeeze(0).permute((1, 2, 0))
+
+                torch_to_pil(result).save('warp.png')
+                torch_to_pil(self.keyframes[kf_1].img).save('hunuparne.png')
+                torch_to_pil(self.keyframes[kf_2].img).save('orig.png')
+
+                # DONE filter warp to be non-degen
+                # for now, filtering out points that are outside of the image bounds
+                normalized_warps_v = normalized_warps[0, ..., 0]
+                normalized_warps_h = normalized_warps[0, ..., 1]
+
+                keep_mask = (
+                    (normalized_warps_v < 1.0)
+                    & (normalized_warps_h < 1.0)
+                    & (normalized_warps_v > -1.0)
+                    & (normalized_warps_h > -1.0)
+                )
+                result = result[keep_mask, ...]
+
+                # DONE calculate huber loss
+                gt = self.keyframes[kf_1].img[keep_mask, ...]
+                loss = F.huber_loss(result, gt)
+
+                # DONE add to the overall loss
+                total_loss += loss * self.conf.pgo_loss_weight
+
+            # outputs.means2d.retain_grad()
 
             total_loss.backward()
 
@@ -443,6 +515,8 @@ class Backend(torch.multiprocessing.Process):
             }
         )
 
+        add_constraint(self.pose_graph, *(list(self.keyframes.keys())[-2:]))
+
     def run(self):
         while True:
             if self.queue.empty():
@@ -463,4 +537,42 @@ class Backend(torch.multiprocessing.Process):
                 case message_from_frontend:
                     self.logger.warning(f"Unknown {message_from_frontend}")
 
+        print(self.pose_graph)
         self.backend_done_event.set()
+
+
+def warp(
+    f1: Frame,
+    f2: Frame,
+    c1: torch.Tensor,  # H, W, 3
+    d1: torch.Tensor,  # H, W
+):
+    K = f1.camera.intrinsics
+    K_inv = torch.linalg.inv(K)
+    T = f2.pose() @ torch.linalg.inv(f1.pose())
+
+    H, W = d1.shape
+
+    # [H, W, 3]
+    grid = torch.stack(
+        [
+            *torch.meshgrid(torch.arange(W), torch.arange(H), indexing='ij'),
+            torch.ones((W, H)),
+        ],
+        dim=-1,
+    ).to(d1.device)
+
+    # backproject in a very ugly way
+    unprojected = torch.matmul(K_inv, grid.unsqueeze(-1))
+    backprojected_points = d1.t().unsqueeze(-1).unsqueeze(-1) * unprojected
+    backprojected_points_in_new_frame = T[:3, :3] @ backprojected_points
+    backprojected_points_in_new_frame = (
+        backprojected_points_in_new_frame.squeeze(-1) + T[:3, 3]
+    )
+    warped_points = torch.matmul(
+        K, backprojected_points_in_new_frame.unsqueeze(-1)
+    ).squeeze(-1)
+    warped_points = warped_points[..., :2] / warped_points[..., [-1]]
+
+    # H, W, 3
+    return warped_points

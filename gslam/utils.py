@@ -1,4 +1,6 @@
 from multiprocessing import Queue
+import pdb
+import sys
 
 from matplotlib import colormaps
 import numpy as np
@@ -97,3 +99,19 @@ def false_colormap(
         image[~mask] = 0.0
     image = image.detach().cpu().numpy().astype(np.uint8)
     return Image.fromarray(image)
+
+
+class ForkedPdb(pdb.Pdb):
+    """A Pdb subclass that may be used
+    from a forked multiprocessing child
+
+    from https://stackoverflow.com/a/23654936
+    """
+
+    def interaction(self, *args, **kwargs):
+        _stdin = sys.stdin
+        try:
+            sys.stdin = open('/dev/stdin')
+            pdb.Pdb.interaction(self, *args, **kwargs)
+        finally:
+            sys.stdin = _stdin
