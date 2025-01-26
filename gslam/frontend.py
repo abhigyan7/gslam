@@ -42,7 +42,7 @@ fpdb = ForkedPdb()
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 50
+    num_tracking_iters: int = 100
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'l1'
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
@@ -549,7 +549,7 @@ class Frontend(mp.Process):
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
         self.Ks = get_projection_matrix().to(self.conf.device)
-        self.warp_jit = get_jit_warp(self.conf.device)
+        self.warp_jit = get_jit_warp('cpu')
 
         self.waiting_for_sync = False
 
