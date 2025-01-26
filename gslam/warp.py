@@ -145,7 +145,7 @@ def warp(
 
 
 def get_jit_warp(device):
-    _sample_inputs = (
+    sample_inputs = (
         torch.randn((4, 4)).to(device),
         torch.randn((4, 4)).to(device),
         torch.randn((3, 3)).to(device),
@@ -153,8 +153,8 @@ def get_jit_warp(device):
         torch.randn((480, 640)).to(device),
     )
     print(f'Jitting warp for {device}')
-    if device == 'cuda':
-        return torch.compile(warp_jit, backend='cudagraphs')
-    else:
-        return torch.compile(warp_jit, backend='onnxrt')
-    # return torch.jit.trace(warp_jit, sample_inputs)
+    # if device == 'cuda':
+    #     return torch.compile(warp_jit, backend='cudagraphs')
+    # else:
+    #     return torch.compile(warp_jit, backend='onnxrt')
+    return torch.jit.trace(warp_jit, sample_inputs)
