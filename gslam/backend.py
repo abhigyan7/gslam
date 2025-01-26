@@ -20,6 +20,7 @@ from .primitives import Frame, Pose
 from .pruning import PruneLowOpacity, PruneLargeGaussians, PruneByVisibility
 from .rasterization import RasterizationOutput
 from .utils import create_batch, ForkedPdb
+from .warp import get_jit_warp
 
 forked_pdb = ForkedPdb()
 
@@ -325,8 +326,6 @@ class Backend(torch.multiprocessing.Process):
             )
 
             if self.conf.enable_pgo and len(self.pose_graph) > 0:
-                # DONE sample a constraint from the pose graph
-
                 kf_1 = random.sample(sorted(self.pose_graph.keys()), 1)[0]
                 kf_2 = random.sample(sorted(self.pose_graph[kf_1]), 1)[0]
 
@@ -336,50 +335,17 @@ class Backend(torch.multiprocessing.Process):
                     render_depth=True,
                 )
 
-                _, H, W, _ = outputs.rgbs.shape
-
-                # DONE create warp
-                warps = warp(
-                    self.keyframes[kf_1],
-                    self.keyframes[kf_2],
+                result, _normalized_warps, keep_mask = self.warp_jit(
+                    self.keyframes[kf_1].pose(),
+                    self.keyframes[kf_2].pose(),
+                    self.keyframes[kf_1].camera.intrinsics,
                     outputs.rgbs[0],
                     outputs.depthmaps[0],
                 )
 
-                normalized_warps = (
-                    warps / torch.tensor([W, H], device=warps.device).float()
-                )
-                normalized_warps *= 2.0
-                normalized_warps -= 1.0
-
-                normalized_warps = normalized_warps.unsqueeze(0)
-
-                normalized_warps = normalized_warps.permute((0, 2, 1, 3))
-                # DONE sample old image as per warp
-                result = F.grid_sample(
-                    outputs.rgbs[1].permute((2, 0, 1)).unsqueeze(0),
-                    normalized_warps,
-                    padding_mode='zeros',
-                    align_corners=False,
-                )
-                result = result.squeeze(0).permute((1, 2, 0))
-
-                # DONE filter warp to be non-degen
-                # for now, filtering out points that are outside of the image bounds
-                normalized_warps_v = normalized_warps[0, ..., 0]
-                normalized_warps_h = normalized_warps[0, ..., 1]
-
-                keep_mask = (
-                    (normalized_warps_v < 1.0)
-                    & (normalized_warps_h < 1.0)
-                    & (normalized_warps_v > -1.0)
-                    & (normalized_warps_h > -1.0)
-                )
                 result = result[keep_mask, ...]
-                gt = self.keyframes[kf_1].img[keep_mask, ...]
+                gt = self.keyframes[kf_2].img[keep_mask, ...]
 
-                # DONE calculate huber loss
-                # DONE add to the overall loss
                 loss += F.huber_loss(result, gt) * self.conf.pgo_loss_weight
 
             loss.backward()
@@ -529,21 +495,14 @@ class Backend(torch.multiprocessing.Process):
         previous_keyframe: Frame,
         new_frame: Frame,
     ):
-        n_visible_gaussians = new_frame.visible_gaussians.sum()
-        n_visible_gaussians_last_kf = previous_keyframe.visible_gaussians.sum()
-
         intersection = torch.logical_and(
             new_frame.visible_gaussians, previous_keyframe.visible_gaussians
         )
         union = torch.logical_or(
             new_frame.visible_gaussians, previous_keyframe.visible_gaussians
         )
-
         iou = intersection.sum() / union.sum()
-        _oc = intersection.sum() / (
-            min(n_visible_gaussians.sum().item(), n_visible_gaussians_last_kf.sum())
-        )
-        return iou > self.conf.kf_cov
+        return iou.item() > self.conf.kf_cov
 
     def add_pgo_constraints(
         self,
@@ -565,6 +524,8 @@ class Backend(torch.multiprocessing.Process):
                 add_constraint(self.pose_graph, i, j)
 
     def run(self):
+        # can't do this before because ScriptFunctions aren't pickle-able
+        self.warp_jit = get_jit_warp(self.conf.device)
         while True:
             if self.queue.empty():
                 continue
@@ -587,40 +548,3 @@ class Backend(torch.multiprocessing.Process):
 
         print(self.pose_graph)
         self.backend_done_event.set()
-
-
-def warp(
-    f1: Frame,
-    f2: Frame,
-    c1: torch.Tensor,  # H, W, 3
-    d1: torch.Tensor,  # H, W
-):
-    K = f1.camera.intrinsics
-    K_inv = torch.linalg.inv(K)
-    T = f2.pose() @ torch.linalg.inv(f1.pose())
-
-    H, W = d1.shape
-
-    # [H, W, 3]
-    grid = torch.stack(
-        [
-            *torch.meshgrid(torch.arange(W), torch.arange(H), indexing='ij'),
-            torch.ones((W, H)),
-        ],
-        dim=-1,
-    ).to(d1.device)
-
-    # backproject in a very ugly way
-    unprojected = torch.matmul(K_inv, grid.unsqueeze(-1))
-    backprojected_points = d1.t().unsqueeze(-1).unsqueeze(-1) * unprojected
-    backprojected_points_in_new_frame = T[:3, :3] @ backprojected_points
-    backprojected_points_in_new_frame = (
-        backprojected_points_in_new_frame.squeeze(-1) + T[:3, 3]
-    )
-    warped_points = torch.matmul(
-        K, backprojected_points_in_new_frame.unsqueeze(-1)
-    ).squeeze(-1)
-    warped_points = warped_points[..., :2] / warped_points[..., [-1]]
-
-    # H, W, 3
-    return warped_points
