@@ -29,11 +29,14 @@ from .utils import (
     torch_image_to_np,
     torch_to_pil,
     false_colormap,
+    ForkedPdb,
 )
 from .warp import get_jit_warp
 
 
 import numpy as np
+
+fpdb = ForkedPdb()
 
 
 @dataclass
@@ -263,7 +266,8 @@ class Frontend(mp.Process):
                 )
                 pose = self.frames[-1].pose() @ d_pose
 
-        new_frame.pose = Pose(pose.detach()).to(self.conf.device)
+        new_frame = new_frame.to('cpu')
+        new_frame.pose = Pose(pose.detach()).to(self.conf.device).cpu()
         pose_optimizer = torch.optim.Adam(
             [
                 {'params': [new_frame.pose.dR], 'lr': self.conf.pose_optim_lr_rotation},
@@ -281,8 +285,11 @@ class Frontend(mp.Process):
             outputs = self.splats(
                 [last_keyframe.camera], [last_keyframe.pose], render_depth=True
             )
-            rgb = outputs.rgbs[0]
-            depthmap = outputs.depthmaps[0]
+            rgb = outputs.rgbs[0].cpu()
+            depthmap = outputs.depthmaps[0].cpu()
+
+        last_keyframe = last_keyframe.to('cpu')
+        last_keyframe.pose = last_keyframe.pose.to('cpu')
 
         for i in (pbar := tqdm.trange(self.conf.num_tracking_iters)):
             pose_optimizer.zero_grad()
@@ -290,7 +297,7 @@ class Frontend(mp.Process):
             result, _normalized_warps, keep_mask = self.warp_jit(
                 last_keyframe.pose(),
                 new_frame.pose(),
-                last_keyframe.camera.intrinsics,
+                last_keyframe.camera.intrinsics.cpu(),
                 rgb,
                 depthmap,
             )
@@ -311,6 +318,10 @@ class Frontend(mp.Process):
 
             last_loss = loss.item()
 
+        new_frame = new_frame.to(self.conf.device)
+        new_frame.pose = new_frame.pose.to(self.conf.device)
+        last_keyframe = last_keyframe.to(self.conf.device)
+        last_keyframe.pose = last_keyframe.pose.to(self.conf.device)
         with torch.no_grad():
             outputs = self.splats(
                 [new_frame.camera], [new_frame.pose], render_depth=True

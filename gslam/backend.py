@@ -525,7 +525,7 @@ class Backend(torch.multiprocessing.Process):
 
     def run(self):
         # can't do this before because ScriptFunctions aren't pickle-able
-        self.warp_jit = get_jit_warp(self.conf.device)
+        self.warp_jit = get_jit_warp('cpu')
         while True:
             if self.queue.empty():
                 continue
