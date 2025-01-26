@@ -95,7 +95,7 @@ class PruneByVisibility(PruningStrategy):
         latest_kf_age: int,
         per_gaussian_params: list[torch.Tensor] = None,
     ):
-        newly_added_gaussians_mask = splats.ages > (latest_kf_age - self.window_size)
+        newly_added_gaussians_mask = splats.ages > (latest_kf_age - 3)  # monogs uses 3
         gaussians_that_arent_visible_enough = visibility_counts < self.min_visibility
 
         remove_mask = newly_added_gaussians_mask & gaussians_that_arent_visible_enough
