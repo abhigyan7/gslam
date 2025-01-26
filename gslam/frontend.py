@@ -9,6 +9,7 @@ from typing import List, Literal, assert_never
 
 import torch
 import torch.multiprocessing as mp
+import torch.nn.functional as F
 
 from PIL import Image
 import rerun as rr
@@ -29,6 +30,7 @@ from .utils import (
     torch_to_pil,
     false_colormap,
 )
+from .warp import get_jit_warp
 
 
 import numpy as np
@@ -177,17 +179,134 @@ class Frontend(mp.Process):
             loss.backward()
             pose_optimizer.step()
 
-            rr.log(
-                '/tracking/loss',
-                rr.Scalar(loss.item()),
+            if 0 < ((last_loss - loss) / loss) < 0.0001:
+                # we've 'converged'!
+                pbar.set_description(
+                    f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
+                )
+                break
+
+            last_loss = loss.item()
+
+        rr.log(
+            '/tracking/loss',
+            rr.Scalar(last_loss),
+        )
+
+        with torch.no_grad():
+            outputs = self.splats(
+                [new_frame.camera], [new_frame.pose], render_depth=True
+            )
+            rendered_rgb = outputs.rgbs[0]
+            rendered_depth = outputs.depthmaps[0]
+            rendered_beta = outputs.betas[0]
+
+            new_frame.visible_gaussians = outputs.n_touched.sum(dim=0) > 0
+
+        rr.log(
+            '/tracking/psnr',
+            rr.Scalar(
+                psnr(
+                    torch_image_to_np(rendered_rgb),
+                    torch_image_to_np(new_frame.img),
+                )
+            ),
+        )
+
+        rr.log(
+            '/tracking/ssim',
+            rr.Scalar(
+                ssim(
+                    torch_image_to_np(rendered_rgb),
+                    torch_image_to_np(new_frame.img),
+                    channel_axis=2,
+                )
+            ),
+        )
+
+        torch_to_pil(rendered_rgb).save(
+            self.output_dir / f'renders/{len(self.frames):08}.jpg'
+        )
+        torch_to_pil(new_frame.img).save(
+            self.output_dir / f'gt/{len(self.frames):08}.jpg'
+        )
+
+        false_colormap(outputs.alphas[0, ..., 0]).save(
+            self.output_dir / f'alphas/{len(self.frames):08}.jpg'
+        )
+
+        false_colormap(rendered_depth, mask=outputs.alphas[0, ..., 0] > 0.3).save(
+            self.output_dir / f'depths/{len(self.frames):08}.jpg'
+        )
+
+        false_colormap(rendered_beta).save(
+            self.output_dir / f'betas/{len(self.frames):08}.jpg'
+        )
+
+        self.frames.append(new_frame.strip())
+
+        last_kf = list(self.keyframes.values())[-1]
+        if self.to_insert_keyframe(last_kf, new_frame, outputs):
+            self.add_keyframe(new_frame)
+
+        return new_frame.pose()
+
+    def warp_track(self, new_frame: Frame):
+        with torch.no_grad():
+            if len(self.frames) < 2:
+                previous_frame = self.frames[-1]
+                pose = previous_frame.pose()
+            else:
+                # constant velocity propagation model
+                d_pose = self.frames[-1].pose() @ torch.linalg.inv(
+                    self.frames[-2].pose()
+                )
+                pose = self.frames[-1].pose() @ d_pose
+
+        new_frame.pose = Pose(pose.detach()).to(self.conf.device)
+        pose_optimizer = torch.optim.Adam(
+            [
+                {'params': [new_frame.pose.dR], 'lr': self.conf.pose_optim_lr_rotation},
+                {
+                    'params': [new_frame.pose.dt],
+                    'lr': self.conf.pose_optim_lr_translation,
+                },
+            ]
+        )
+
+        last_loss = float('inf')
+
+        last_keyframe = self.keyframes[sorted(self.keyframes.keys())[-1]]
+        with torch.no_grad():
+            outputs = self.splats(
+                [last_keyframe.camera], [last_keyframe.pose], render_depth=True
+            )
+            rgb = outputs.rgbs[0]
+            depthmap = outputs.depthmaps[0]
+
+        for i in (pbar := tqdm.trange(self.conf.num_tracking_iters)):
+            pose_optimizer.zero_grad()
+
+            result, _normalized_warps, keep_mask = self.warp_jit(
+                last_keyframe.pose(),
+                new_frame.pose(),
+                last_keyframe.camera.intrinsics,
+                rgb,
+                depthmap,
             )
 
-            pbar.set_description(
-                f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
-            )
+            result = result[keep_mask, ...]
+            gt = new_frame.img[keep_mask, ...]
+            # loss = F.huber_loss(result, gt)
+            loss = F.l1_loss(result, gt)
+            loss.backward()
+            pose_optimizer.step()
 
             if 0 < ((last_loss - loss) / loss) < 0.0001:
                 # we've 'converged'!
+                pbar.set_description(
+                    f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
+                )
                 break
 
             last_loss = loss.item()
@@ -201,6 +320,11 @@ class Frontend(mp.Process):
             rendered_beta = outputs.betas[0]
 
             new_frame.visible_gaussians = outputs.n_touched.sum(dim=0) > 0
+
+        rr.log(
+            '/tracking/loss',
+            rr.Scalar(loss.item()),
+        )
 
         rr.log(
             '/tracking/psnr',
@@ -414,6 +538,7 @@ class Frontend(mp.Process):
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
         self.Ks = get_projection_matrix().to(self.conf.device)
+        self.warp_jit = get_jit_warp(self.conf.device)
 
         self.waiting_for_sync = False
 
@@ -447,7 +572,8 @@ class Frontend(mp.Process):
                 self.keyframes[frame.index] = frame
                 self.waiting_for_sync = True
             else:
-                self.track(frame)
+                # self.track(frame)
+                self.warp_track(frame)
 
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')

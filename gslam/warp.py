@@ -17,17 +17,21 @@ def warp_jit(
 
     H, W = d1.shape
 
-    uu, vv = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='ij')
+    uu, vv = torch.meshgrid(
+        torch.arange(W, device=K.device),
+        torch.arange(H, device=K.device),
+        indexing='ij',
+    )
 
     # [H, W, 3]
     grid = torch.stack(
         [
             uu,
             vv,
-            torch.ones((W, H)),
+            torch.ones((W, H), device=K.device),
         ],
         dim=-1,
-    ).to(d1.device)
+    ).to(K.device)
 
     # backproject in a very ugly way
     unprojected = torch.matmul(K_inv, grid.unsqueeze(-1))
@@ -41,7 +45,7 @@ def warp_jit(
     ).squeeze(-1)
     warps = warped_points[..., :2] / warped_points[..., -1].unsqueeze(-1)
 
-    normalized_warps = warps / torch.tensor([W, H], device=warps.device).float()
+    normalized_warps = warps / torch.tensor([W, H], device=K.device).float()
     normalized_warps *= 2.0
     normalized_warps -= 1.0
 
@@ -87,8 +91,12 @@ def warp(
     # [H, W, 3]
     grid = torch.stack(
         [
-            *torch.meshgrid(torch.arange(W), torch.arange(H), indexing='ij'),
-            torch.ones((W, H)),
+            *torch.meshgrid(
+                torch.arange(W, device=K.device),
+                torch.arange(H, device=K.device),
+                indexing='ij',
+            ),
+            torch.ones((W, H), device=K.device),
         ],
         dim=-1,
     ).to(d1.device)
@@ -137,11 +145,12 @@ def warp(
 
 
 def get_jit_warp(device):
-    sample_inputs = (
+    _sample_inputs = (
         torch.randn((4, 4)).to(device),
         torch.randn((4, 4)).to(device),
         torch.randn((3, 3)).to(device),
         torch.randn((480, 640, 3)).to(device),
         torch.randn((480, 640)).to(device),
     )
-    return torch.jit.trace(warp_jit, sample_inputs)
+    return torch.compile(warp_jit, backend='cudagraphs')
+    # return torch.jit.trace(warp_jit, sample_inputs)
