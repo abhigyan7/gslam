@@ -55,7 +55,7 @@ class MapConfig:
     initial_extent: float = 1.0
     initial_beta: float = 0.3
 
-    device: str = 'cuda:0'
+    device: str = 'cuda'
 
     optim_window_last_n_keyframes: int = 8  # MonoGS does 8
     optim_window_random_keyframes: int = 2
