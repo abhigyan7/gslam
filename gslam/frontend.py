@@ -266,8 +266,7 @@ class Frontend(mp.Process):
                 )
                 pose = self.frames[-1].pose() @ d_pose
 
-        new_frame = new_frame.to('cpu')
-        new_frame.pose = Pose(pose.detach()).to(self.conf.device).cpu()
+        new_frame.pose = Pose(pose.detach()).to(self.conf.device)
         pose_optimizer = torch.optim.Adam(
             [
                 {'params': [new_frame.pose.dR], 'lr': self.conf.pose_optim_lr_rotation},
@@ -285,11 +284,8 @@ class Frontend(mp.Process):
             outputs = self.splats(
                 [last_keyframe.camera], [last_keyframe.pose], render_depth=True
             )
-            rgb = outputs.rgbs[0].cpu()
-            depthmap = outputs.depthmaps[0].cpu()
-
-        last_keyframe = last_keyframe.to('cpu')
-        last_keyframe.pose = last_keyframe.pose.to('cpu')
+            rgb = outputs.rgbs[0]
+            depthmap = outputs.depthmaps[0]
 
         for i in (pbar := tqdm.trange(self.conf.num_tracking_iters)):
             pose_optimizer.zero_grad()
@@ -297,7 +293,7 @@ class Frontend(mp.Process):
             result, _normalized_warps, keep_mask = self.warp_jit(
                 last_keyframe.pose(),
                 new_frame.pose(),
-                last_keyframe.camera.intrinsics.cpu(),
+                last_keyframe.camera.intrinsics,
                 rgb,
                 depthmap,
             )
@@ -549,7 +545,7 @@ class Frontend(mp.Process):
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
         self.Ks = get_projection_matrix().to(self.conf.device)
-        self.warp_jit = get_jit_warp('cpu')
+        self.warp_jit = get_jit_warp(self.conf.device)
 
         self.waiting_for_sync = False
 
