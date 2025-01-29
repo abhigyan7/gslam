@@ -18,7 +18,12 @@ from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .pose_graph import add_constraint
 from .primitives import Frame, Pose
-from .pruning import PruneLowOpacity, PruneLargeGaussians, PruneByVisibility
+from .pruning import (
+    PruneLowOpacity,
+    PruneLargeGaussians,
+    PruneIllConditionedGaussians,
+    prune_using_mask,
+)
 from .rasterization import RasterizationOutput
 from .utils import create_batch, ForkedPdb
 from .warp import Warp
@@ -123,9 +128,7 @@ class Backend(torch.multiprocessing.Process):
             0.0002,
             0.01,
         )
-        self.pruning_visibility = PruneByVisibility(
-            self.conf.visibility_pruning_window_size, self.conf.min_visibility
-        )
+        self.pruning_conditioning = PruneIllConditionedGaussians(3)
         self.initialized: bool = False
 
         if not self.conf.use_betas:
@@ -171,8 +174,10 @@ class Backend(torch.multiprocessing.Process):
         #             torch.sigmoid(self.splats.opacities.data) * 0.5
         #         )
 
-        visibility_counts = torch.zeros_like(self.splats.opacities).long()
         window_size = -1
+
+        radii = None
+        n_touched = None
 
         for step in (pbar := tqdm.trange(n_iters)):
             window = self.optimization_window()
@@ -221,18 +226,18 @@ class Backend(torch.multiprocessing.Process):
                 + self.conf.ssim_weight * ssim_loss
             )
 
-            # outputs.means2d.retain_grad()
+            outputs.means2d.retain_grad()
 
             total_loss.backward()
 
-            # if step in (n_iters // 3, 2 * n_iters // 3):
-            #     self.insertion_3dgs.step(
-            #         self.splats,
-            #         self.splat_optimizers,
-            #         outputs,
-            #         None,
-            #         None,
-            #     )
+            if step in (n_iters // 3, 2 * n_iters // 3):
+                self.insertion_3dgs.step(
+                    self.splats,
+                    self.splat_optimizers,
+                    outputs,
+                    None,
+                    None,
+                )
 
             desc = (
                 f"[Mapping] keyframe {len(self.keyframes)} loss={photometric_loss.item():.3f}, "
@@ -243,36 +248,36 @@ class Backend(torch.multiprocessing.Process):
 
             self.step_all_optimizers()
 
-            visibility_counts += (outputs.n_touched.sum(dim=0) > 0).long()
-
         gaussians_max_screen_size = torch.max(outputs.radii, axis=0).values
-        per_gaussian_stats = [gaussians_max_screen_size]
 
-        # visibility_pruning
-        latest_kf_age = list(self.keyframes.keys())[-1]
+        remove_mask = torch.zeros(
+            (self.splats.means.shape[0]), dtype=torch.bool, device=self.conf.device
+        )
+
         if self.conf.enable_visibility_pruning and (
             window_size >= self.conf.optim_window_last_n_keyframes
         ):
-            self.pruning_visibility.step(
-                self.splats,
-                self.splat_optimizers,
-                visibility_counts,
-                latest_kf_age,
-                per_gaussian_stats,
+            radii = outputs.radii[: self.conf.optim_window_last_n_keyframes]
+            n_touched = outputs.n_touched[: self.conf.optim_window_last_n_keyframes]
+            remove_mask = remove_mask | self.pruning_conditioning.step(
+                self.splats, self.splat_optimizers, radii, n_touched
             )
 
         # size pruning
-        self.pruning_size.step(
+        remove_mask = remove_mask | self.pruning_size.step(
             self.splats,
             self.splat_optimizers,
-            per_gaussian_stats[0],
+            gaussians_max_screen_size,
         )
 
         # opacity pruning
-        self.pruning_opacity.step(
+        remove_mask = remove_mask | self.pruning_opacity.step(
             self.splats,
             self.splat_optimizers,
         )
+
+        n_pruned = prune_using_mask(self.splats, self.splat_optimizers, ~remove_mask)
+        print(f'Pruned {n_pruned} gaussians')
 
         last_kf = list(self.keyframes.values())[-1]
 

@@ -41,12 +41,12 @@ fpdb = ForkedPdb()
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 100
+    num_tracking_iters: int = 1000
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'l1'
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
 
-    kf_cov = 0.7
+    kf_cov = 0.9
     kf_oc = 0.4
     kf_m = 0.08
 
@@ -186,7 +186,7 @@ class Frontend(mp.Process):
             loss.backward()
             pose_optimizer.step()
 
-            if 0 < ((last_loss - loss) / loss) < (1.0 / 255.0):
+            if 0 < ((last_loss - loss) / loss) < (1.0 / 2550.0):
                 # we've 'converged'!
                 pbar.set_description(
                     f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
@@ -317,7 +317,7 @@ class Frontend(mp.Process):
             if 0 < ((last_loss - loss) / loss) < (1.0 / 255.0):
                 # we've 'converged'!
                 pbar.set_description(
-                    f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
+                    f"[Warp Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
                 )
                 break
 
