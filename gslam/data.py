@@ -11,7 +11,7 @@ from .primitives import Camera, Frame, Pose
 
 
 class TumRGB:
-    def __init__(self, sequence_dir: Path, seq_len: int = -1):
+    def __init__(self, sequence_dir: Path, seq_len: int = -1, scale: float = 1.0):
         self.sequence_dir = Path(sequence_dir)
 
         rgb_frames = np.loadtxt(self.sequence_dir / "rgb.txt", np.str_)
@@ -52,6 +52,7 @@ class TumRGB:
         self.length = self.num_frames
         if seq_len > 0:
             self.length = min(self.num_frames, seq_len)
+        self.scale = scale
 
     def __len__(self):
         return self.length
@@ -60,13 +61,16 @@ class TumRGB:
         if idx >= len(self):
             raise StopIteration
         rgb_filename = self.sequence_dir / self.rgb_frame_filenames[idx]
-        image = np.asarray(Image.open(rgb_filename))
-        image = np.float32(image) / 255.0
+        im = Image.open(rgb_filename)
+        image = im.resize((int(im.width / self.scale), int(im.height / self.scale)))
+        image = np.asarray(np.float32(image)) / 255.0
         image = torch.Tensor(image).cuda()
         height, width, _channels = image.shape
 
         depth_filename = self.sequence_dir / self.depth_frame_filenames[idx]
-        depth_image = np.asarray(Image.open(depth_filename))
+        depth_im = Image.open(depth_filename)
+        depth_im = depth_im.resize((width, height))
+        depth_image = np.asarray(depth_im)
         depth_image = torch.Tensor(depth_image.copy()).cuda() / 5000.0
 
         gt_pose = torch.Tensor(self.poses[idx, ...])
@@ -78,7 +82,7 @@ class TumRGB:
                 [0.0, 0.0, 1.0],
             ]
         ).cuda()
-        camera = Camera(Ks, height, width)
+        camera = Camera(Ks / self.scale, height, width)
         frame = Frame(
             image,
             ts,
