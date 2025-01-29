@@ -88,7 +88,7 @@ class MapConfig:
     # pose graph optimization
     enable_pgo: bool = False
     pgo_loss_weight: float = 1.0
-    kf_cov: float = 0.7
+    kf_cov: float = 0.9
 
 
 def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
@@ -135,6 +135,7 @@ class Backend(torch.multiprocessing.Process):
             self.conf.betas_regularization_weight = 0.0
 
         self.pose_graph = defaultdict(set)
+        self.total_step = 0
 
     def optimization_window(self) -> list[Frame]:
         window_size_total = (
@@ -167,19 +168,13 @@ class Backend(torch.multiprocessing.Process):
                 else self.conf.num_iters_initialization
             )
 
-        # if self.conf.reset_opacity:
-        #     with torch.no_grad():
-        #         # reset opacities. not sure if no_grad is needed here.
-        #         self.splats.opacities.data = torch.logit(
-        #             torch.sigmoid(self.splats.opacities.data) * 0.5
-        #         )
-
         window_size = -1
 
         radii = None
         n_touched = None
 
         for step in (pbar := tqdm.trange(n_iters)):
+            self.total_step += 1
             window = self.optimization_window()
             window_size = len(window)
             cameras = [x.camera for x in window]
@@ -226,11 +221,35 @@ class Backend(torch.multiprocessing.Process):
                 + self.conf.ssim_weight * ssim_loss
             )
 
+            if self.conf.enable_pgo and len(self.pose_graph) > 0:
+                kf_1 = random.sample(sorted(self.pose_graph.keys()), 1)[0]
+                kf_2 = random.sample(sorted(self.pose_graph[kf_1]), 1)[0]
+
+                pgo_outputs: RasterizationOutput = self.splats(
+                    [self.keyframes[kf].camera for kf in (kf_1, kf_2)],
+                    [self.keyframes[kf].pose for kf in (kf_1, kf_2)],
+                    render_depth=True,
+                )
+
+                result, _normalized_warps, keep_mask = self.warp(
+                    self.keyframes[kf_1].pose(),
+                    self.keyframes[kf_2].pose(),
+                    self.keyframes[kf_1].camera.intrinsics,
+                    pgo_outputs.rgbs[0],
+                    pgo_outputs.depthmaps[0],
+                )
+
+                result = result[keep_mask, ...]
+                gt = self.keyframes[kf_2].img[keep_mask, ...]
+
+                total_loss += F.huber_loss(result, gt) * self.conf.pgo_loss_weight
+
             outputs.means2d.retain_grad()
 
             total_loss.backward()
 
-            if step in (n_iters // 3, 2 * n_iters // 3):
+            prune = True
+            if self.initialized and ((self.total_step % 66) == 0):
                 self.insertion_3dgs.step(
                     self.splats,
                     self.splat_optimizers,
@@ -238,6 +257,7 @@ class Backend(torch.multiprocessing.Process):
                     None,
                     None,
                 )
+                prune = False
 
             desc = (
                 f"[Mapping] keyframe {len(self.keyframes)} loss={photometric_loss.item():.3f}, "
@@ -254,14 +274,18 @@ class Backend(torch.multiprocessing.Process):
             (self.splats.means.shape[0]), dtype=torch.bool, device=self.conf.device
         )
 
-        if self.conf.enable_visibility_pruning and (
-            window_size >= self.conf.optim_window_last_n_keyframes
+        if (
+            self.conf.enable_visibility_pruning
+            and prune
+            and (window_size >= self.conf.optim_window_last_n_keyframes)
+            and (self.total_step % 200 == 0)
         ):
             radii = outputs.radii[: self.conf.optim_window_last_n_keyframes]
             n_touched = outputs.n_touched[: self.conf.optim_window_last_n_keyframes]
             remove_mask = remove_mask | self.pruning_conditioning.step(
                 self.splats, self.splat_optimizers, radii, n_touched
             )
+            print(f'Removing {remove_mask.sum()} gaussians by visibility.')
 
         # size pruning
         remove_mask = remove_mask | self.pruning_size.step(
@@ -295,12 +319,6 @@ class Backend(torch.multiprocessing.Process):
         if self.conf.enable_pgo:
             self.add_pgo_constraints()
 
-        # with torch.no_grad():
-        #     # reset opacities. not sure if no_grad is needed here.
-        #     self.splats.opacities.data = torch.logit(
-        #         torch.sigmoid(self.splats.opacities.data) * 0.0
-        #         + self.conf.opacity_after_reset
-        #     )
         for step in (pbar := tqdm.trange(n_iters)):
             window = random.sample(
                 sorted(self.keyframes.keys()), min(10, len(self.keyframes))
@@ -534,8 +552,8 @@ class Backend(torch.multiprocessing.Process):
         while True:
             if self.queue.empty():
                 if self.initialized:
+                    self.optimize_map(20)
                     pass
-                    # self.optimize_map(20)
                 time.sleep(0.02)
                 continue
             match self.queue.get():
@@ -551,7 +569,7 @@ class Backend(torch.multiprocessing.Process):
                             frame.camera.width,
                         )
                     self.add_keyframe(frame)
-                    self.optimize_map()
+                    self.optimize_map(20)
                     self.sync_with_frontend()
                 case None:
                     print('Running final optimization.')

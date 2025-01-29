@@ -591,8 +591,8 @@ class Frontend(mp.Process):
                 self.keyframes[frame.index] = frame
                 self.waiting_for_sync = True
             else:
-                self.track(frame)
-                # self.warp_track(frame)
+                # self.track(frame)
+                self.warp_track(frame)
 
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')
