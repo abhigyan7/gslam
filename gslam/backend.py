@@ -4,6 +4,7 @@ from itertools import combinations
 import logging
 import random
 import threading
+import time
 from copy import deepcopy
 from typing import Dict
 
@@ -20,7 +21,7 @@ from .primitives import Frame, Pose
 from .pruning import PruneLowOpacity, PruneLargeGaussians, PruneByVisibility
 from .rasterization import RasterizationOutput
 from .utils import create_batch, ForkedPdb
-from .warp import get_jit_warp
+from .warp import Warp
 
 forked_pdb = ForkedPdb()
 
@@ -335,7 +336,7 @@ class Backend(torch.multiprocessing.Process):
                     render_depth=True,
                 )
 
-                result, _normalized_warps, keep_mask = self.warp_jit(
+                result, _normalized_warps, keep_mask = self.warp(
                     self.keyframes[kf_1].pose(),
                     self.keyframes[kf_2].pose(),
                     self.keyframes[kf_1].camera.intrinsics,
@@ -524,12 +525,13 @@ class Backend(torch.multiprocessing.Process):
                 add_constraint(self.pose_graph, i, j)
 
     def run(self):
-        # can't do this before because ScriptFunctions aren't pickle-able
-        self.warp_jit = get_jit_warp(self.conf.device)
+        self.warp = None
         while True:
             if self.queue.empty():
                 if self.initialized:
-                    self.optimize_map(20)
+                    pass
+                    # self.optimize_map(20)
+                time.sleep(0.02)
                 continue
             match self.queue.get():
                 case [FrontendMessage.REQUEST_INITIALIZE, frame]:
@@ -537,6 +539,12 @@ class Backend(torch.multiprocessing.Process):
                     self.frontend_queue.put([BackendMessage.SIGNAL_INITIALIZED])
                     self.sync_with_frontend()
                 case [FrontendMessage.ADD_KEYFRAME, frame]:
+                    if self.warp is None:
+                        self.warp = Warp(
+                            frame.camera.intrinsics,
+                            frame.camera.height,
+                            frame.camera.width,
+                        )
                     self.add_keyframe(frame)
                     self.optimize_map()
                     self.sync_with_frontend()

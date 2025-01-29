@@ -24,14 +24,13 @@ from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, Pose
 from .trajectory import evaluate_trajectories
 from .utils import (
-    get_projection_matrix,
     q_get,
     torch_image_to_np,
     torch_to_pil,
     false_colormap,
     ForkedPdb,
 )
-from .warp import get_jit_warp
+from .warp import Warp
 
 
 import numpy as np
@@ -172,7 +171,12 @@ class Frontend(mp.Process):
 
         last_loss = float('inf')
 
-        for i in (pbar := tqdm.trange(self.conf.num_tracking_iters)):
+        for i in (
+            pbar := tqdm.trange(
+                self.conf.num_tracking_iters,
+                desc=f"[Tracking] frame {len(self.frames)}",
+            )
+        ):
             pose_optimizer.zero_grad()
             outputs = self.splats([new_frame.camera], [new_frame.pose])
 
@@ -182,7 +186,7 @@ class Frontend(mp.Process):
             loss.backward()
             pose_optimizer.step()
 
-            if 0 < ((last_loss - loss) / loss) < 0.0001:
+            if 0 < ((last_loss - loss) / loss) < (1.0 / 255.0):
                 # we've 'converged'!
                 pbar.set_description(
                     f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
@@ -287,10 +291,15 @@ class Frontend(mp.Process):
             rgb = outputs.rgbs[0]
             depthmap = outputs.depthmaps[0]
 
-        for i in (pbar := tqdm.trange(self.conf.num_tracking_iters)):
+        for i in (
+            pbar := tqdm.trange(
+                self.conf.num_tracking_iters,
+                desc=f"[Warp Tracking] frame {len(self.frames)}",
+            )
+        ):
             pose_optimizer.zero_grad()
 
-            result, _normalized_warps, keep_mask = self.warp_jit(
+            result, _normalized_warps, keep_mask = self.warp(
                 last_keyframe.pose(),
                 new_frame.pose(),
                 last_keyframe.camera.intrinsics,
@@ -305,7 +314,7 @@ class Frontend(mp.Process):
             loss.backward()
             pose_optimizer.step()
 
-            if 0 < ((last_loss - loss) / loss) < 0.0001:
+            if 0 < ((last_loss - loss) / loss) < (1.0 / 255.0):
                 # we've 'converged'!
                 pbar.set_description(
                     f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
@@ -544,8 +553,7 @@ class Frontend(mp.Process):
         rr.save(self.output_dir / 'rr-fe.rrd')
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
-        self.Ks = get_projection_matrix().to(self.conf.device)
-        self.warp_jit = get_jit_warp(self.conf.device)
+        self.warp = None
 
         self.waiting_for_sync = False
 
@@ -574,13 +582,17 @@ class Frontend(mp.Process):
                 break
 
             frame = frame.to(self.conf.device)
+            if self.warp is None:
+                self.warp = Warp(
+                    frame.camera.intrinsics, frame.camera.height, frame.camera.width
+                )
             if not self.initialized:
                 self.request_initialization(frame)
                 self.keyframes[frame.index] = frame
                 self.waiting_for_sync = True
             else:
-                # self.track(frame)
-                self.warp_track(frame)
+                self.track(frame)
+                # self.warp_track(frame)
 
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')
