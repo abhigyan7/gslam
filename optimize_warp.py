@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from gslam.warp import Warp
+from gslam.warp import Warp, diffwarp_wrap, DiffWarp
 from gslam.data import TumRGB
 import time
 import torch
@@ -11,8 +11,11 @@ f1 = dataset[0].to(device)
 f2 = dataset[10].to(device)
 
 warp_module = Warp(f1.camera.intrinsics, f1.camera.height, f1.camera.width)
+diffwarp_module = DiffWarp(f1.camera.intrinsics, f1.camera.height, f1.camera.width)
 
 warp_fns = {
+    'diffwarp': diffwarp_wrap,
+    'diffwarp_module': diffwarp_wrap,
     'warp_module': warp_module,
     'warp_module_traced': torch.jit.trace_module(
         warp_module,
@@ -29,8 +32,8 @@ warp_fns = {
     ),
 }
 
-if device == 'cuda':
-    warp_fns['warp_module_compiled'] = torch.compile(warp_module, backend='cudagraphs')
+# if device == 'cuda':
+#     warp_fns['warp_module_compiled'] = torch.compile(warp_module, backend='cudagraphs')
 
 
 def profile_warn_fn(warp_fn_name, warp_fn, num_runs=50):
