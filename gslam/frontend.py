@@ -47,6 +47,9 @@ class TrackingConfig:
     pose_optim_lr_rotation: float = 0.003
     method: Literal['igs', 'warp'] = 'igs'
 
+    dt_regularization: float = 0.01
+    dR_regularization: float = 0.001
+
     kf_cov = 0.8
     kf_oc = 0.4
     kf_m = 0.08
@@ -202,10 +205,14 @@ class Frontend(mp.Process):
                 result = result[keep_mask, ...]
                 gt = new_frame.img[keep_mask, ...]
                 loss = F.l1_loss(result, gt)
+
+            loss += new_frame.pose.dR.norm() * self.conf.dR_regularization
+            loss += new_frame.pose.dt.norm() * self.conf.dt_regularization
+
             loss.backward()
             pose_optimizer.step()
 
-            if 0 < ((last_loss - loss) / loss) < (1.0 / 255.0):
+            if 0 < ((last_loss - loss) / loss) < (1.0 / 2550.0):
                 # we've 'converged'!
                 pbar.set_description(
                     f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"

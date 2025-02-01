@@ -35,7 +35,7 @@ def rotation_6d_to_matrix(d6: torch.Tensor) -> torch.Tensor:
 
 
 # https://github.com/nerfstudio-project/gsplat/blob/795161945b37747709d4da965b226a19fdf87d3f/examples/utils.py
-class Pose(torch.nn.Module):
+class PoseZhou(torch.nn.Module):
     def __init__(self, _pose: torch.Tensor = None, is_learnable: bool = True):
         super().__init__()
 
@@ -74,6 +74,73 @@ class Pose(torch.nn.Module):
         transform[..., :3, :3] = rot
         transform[..., :3, 3] = self.dt
         return torch.matmul(self.Rt, transform)
+
+    def to_qt(
+        self,
+    ):
+        pose = self()
+        R = pose[:3, :3]
+        t = pose[:3, 3]
+        return unvmap(matrix_to_quaternion)(R), t
+
+
+class Pose(torch.nn.Module):
+    def __init__(self, _pose: torch.Tensor = None, is_learnable: bool = True):
+        super().__init__()
+
+        self.is_learnable = is_learnable
+        self.Rt = torch.nn.Buffer(_pose)
+        if _pose is None:
+            self.Rt = torch.nn.Buffer(torch.eye(4))
+
+        self.dt = torch.nn.Parameter(
+            torch.tensor(
+                [0, 0, 0],
+                dtype=torch.float32,
+                requires_grad=is_learnable,
+            )
+        )
+
+        self.dR = torch.nn.Parameter(
+            torch.tensor(
+                [0, 0, 0],
+                dtype=torch.float32,
+                requires_grad=is_learnable,
+            )
+        )
+
+    def forward(self) -> torch.Tensor:
+        if not self.is_learnable:
+            return self.Rt
+
+        # https://github.com/nerfstudio-project/nerfstudio/blob/main/nerfstudio/cameras/lie_groups.py#L25
+        # code for SO3 map grabbed from pytorch3d and stripped down to bare-bones
+        log_rot = self.dR
+        nrms = (log_rot * log_rot).sum()
+        rot_angle = torch.clamp(nrms, 1e-4).sqrt()
+        rot_angle_inv = 1.0 / rot_angle
+        fac1 = rot_angle_inv * rot_angle.sin()
+        fac2 = rot_angle_inv * rot_angle_inv * (1.0 - rot_angle.cos())
+        skew = torch.zeros((3, 3), dtype=log_rot.dtype, device=log_rot.device)
+        skew[0, 1] = -log_rot[2]
+        skew[0, 2] = log_rot[1]
+        skew[1, 0] = log_rot[2]
+        skew[1, 2] = -log_rot[0]
+        skew[2, 0] = -log_rot[1]
+        skew[2, 1] = log_rot[0]
+        skew_square = torch.mm(skew, skew)
+
+        ret = torch.eye(4, device=self.Rt.device)
+        ret[:3, :3] = (
+            fac1 * skew
+            + fac2 * skew_square
+            + torch.eye(3, dtype=log_rot.dtype, device=log_rot.device)
+        )
+
+        # Compute the translation
+        ret[:3, 3] = self.dt
+
+        return torch.matmul(self.Rt, ret)
 
     def to_qt(
         self,

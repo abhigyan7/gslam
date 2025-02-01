@@ -243,7 +243,7 @@ class Backend(torch.multiprocessing.Process):
                 result = result[keep_mask, ...]
                 gt = self.keyframes[kf_2].img[keep_mask, ...]
 
-                total_loss += F.huber_loss(result, gt) * self.conf.pgo_loss_weight
+                total_loss += F.l1_loss(result, gt) * self.conf.pgo_loss_weight
 
             outputs.means2d.retain_grad()
 
