@@ -337,7 +337,6 @@ class Frontend(mp.Process):
                 'tracking': self.frames,
             }
         )
-
         fig.savefig(self.output_dir / 'traj.png')
 
         for i, f in enumerate(self.frames):
@@ -499,6 +498,10 @@ class Frontend(mp.Process):
         metrics.update(self.evaluate_reconstruction())
         metrics.update(self.evaluate_trajectory())
         self.create_videos()
+
+        metrics['N'] = self.splats.means.shape[0]
+        metrics['C'] = len(self.keyframes)
+        metrics['L'] = len(self.frames)
 
         print(f'{metrics=}')
         with open(self.output_dir / 'metrics.json', 'w') as f:
