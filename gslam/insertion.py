@@ -147,7 +147,7 @@ class InsertFromDepthMap(InsertionStrategy):
         )
         depths[~valid_depth_region] = median_depth
         depths[~valid_depth_region] += (
-            random_depths[~valid_depth_region] * self.depth_variance
+            random_depths[~valid_depth_region] * self.no_depth_variance
         )
 
         pixel_indices_where_depth_is_valid = torch.nonzero(

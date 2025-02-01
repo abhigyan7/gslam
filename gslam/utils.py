@@ -78,6 +78,7 @@ def false_colormap(
     near: float = None,
     far: float = None,
     mask: torch.Tensor = None,
+    colormap: str = 'turbo',
 ) -> Image:
     '''image in (H,W)'''
     if mask is None:
@@ -92,7 +93,7 @@ def false_colormap(
     image = torch.nan_to_num(image, 0.0)
     image = image.clip(0.0, 1.0)
     image = (image * 255.0).long()
-    image = torch.tensor(colormaps['turbo'].colors, device=image.device)[image]
+    image = torch.tensor(colormaps[colormap].colors, device=image.device)[image]
     image = image * 255.0
     if mask is not None:
         # make invalid regions black

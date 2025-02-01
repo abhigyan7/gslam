@@ -36,7 +36,6 @@ class Warp(torch.nn.Module):
         self,
         f1_pose: torch.Tensor,
         f2_pose: torch.Tensor,
-        _K: torch.Tensor,
         c1: torch.Tensor,
         d1: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
