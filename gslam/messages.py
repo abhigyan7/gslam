@@ -2,11 +2,10 @@ from enum import StrEnum, auto
 
 
 class FrontendMessage(StrEnum):
-    REQUEST_INITIALIZE = auto()
-    ADD_KEYFRAME = auto()
-    REQUEST_SYNC = auto()
+    ADD_FRAME = auto()
+    ADD_REFINED_DEPTHMAP = auto()
 
 
 class BackendMessage(StrEnum):
-    SIGNAL_INITIALIZED = auto()
     SYNC = auto()
+    END_SYNC = auto()

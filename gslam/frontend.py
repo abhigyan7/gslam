@@ -5,6 +5,7 @@ import logging
 import os
 from pathlib import Path
 from threading import Event
+import time
 from typing import List, Literal, assert_never
 
 import torch
@@ -19,7 +20,6 @@ from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import peak_signal_noise_ratio as psnr
 
 from .map import GaussianSplattingData
-from .rasterization import RasterizationOutput
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, Pose
 from .trajectory import evaluate_trajectories
@@ -45,7 +45,6 @@ class TrackingConfig:
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'l1'
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
-    method: Literal['igs', 'warp'] = 'igs'
 
     dt_regularization: float = 0.01
     dR_regularization: float = 0.001
@@ -72,10 +71,7 @@ class Frontend(mp.Process):
         self.queue: mp.Queue[int] = frontend_queue
         self.keyframes: dict[int, Frame] = dict()
 
-        self.splats = GaussianSplattingData.empty()
-
         self.requested_init = False
-        self.initialized: bool = False
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.DEBUG)
         handler = logging.StreamHandler()
@@ -102,37 +98,6 @@ class Frontend(mp.Process):
         os.makedirs(self.output_dir / 'final_renders', exist_ok=True)
         os.makedirs(self.output_dir / 'final_depths', exist_ok=True)
 
-    def to_insert_keyframe(
-        self,
-        previous_keyframe: Frame,
-        new_frame: Frame,
-        render_outputs: RasterizationOutput,
-    ):
-        n_visible_gaussians = new_frame.visible_gaussians.sum()
-        n_visible_gaussians_last_kf = previous_keyframe.visible_gaussians.sum()
-
-        intersection = torch.logical_and(
-            new_frame.visible_gaussians, previous_keyframe.visible_gaussians
-        )
-        union = torch.logical_or(
-            new_frame.visible_gaussians, previous_keyframe.visible_gaussians
-        )
-
-        iou = intersection.sum() / union.sum()
-        _oc = intersection.sum() / (
-            min(n_visible_gaussians.sum().item(), n_visible_gaussians_last_kf.sum())
-        )
-        if iou < self.conf.kf_cov:
-            return True
-        pose_difference = torch.linalg.inv(new_frame.pose()) @ previous_keyframe.pose()
-        translation = pose_difference[:3, 3].pow(2.0).sum().pow(0.5).item()
-        median_depth = render_outputs.depthmaps[
-            render_outputs.alphas[..., 0] > 0.1
-        ].median()
-        if translation > self.conf.kf_m * median_depth:
-            return True
-        return False
-
     def tracking_loss(
         self,
         gt_img: torch.Tensor,
@@ -150,67 +115,65 @@ class Frontend(mp.Process):
             case _:
                 assert_never(self.conf.photometric_loss)
 
-    def track(self, new_frame: Frame):
-        with torch.no_grad():
-            if len(self.frames) < 2:
-                previous_frame = self.frames[-1]
-                pose = previous_frame.pose()
-            else:
-                # constant velocity propagation model
-                d_pose = self.frames[-1].pose() @ torch.linalg.inv(
-                    self.frames[-2].pose()
-                )
-                pose = self.frames[-1].pose() @ d_pose
-
+    def initialize(self, new_frame: Frame):
+        pose = torch.eye(4, device=self.conf.device)
         new_frame.pose = Pose(pose.detach()).to(self.conf.device)
-        pose_optimizer = torch.optim.Adam(
-            [
-                {'params': [new_frame.pose.dR], 'lr': self.conf.pose_optim_lr_rotation},
-                {
-                    'params': [new_frame.pose.dt],
-                    'lr': self.conf.pose_optim_lr_translation,
-                },
-            ]
+        self.keyframes[new_frame.index] = new_frame
+        self.reference_frame = new_frame
+        self.reference_depthmap = torch.ones_like(
+            new_frame.gt_depth, requires_grad=True
         )
+        return
 
-        last_keyframe = self.keyframes[sorted(self.keyframes.keys())[-1]]
-        last_loss = float('inf')
-        with torch.no_grad():
-            outputs = self.splats(
-                [last_keyframe.camera], [last_keyframe.pose], render_depth=True
+    def track(self, new_frame: Frame):
+        if len(self.frames) == 0:
+            self.initialize(new_frame)
+            n_iters = 0
+        else:
+            pose = self.reference_frame.pose()
+            new_frame.pose = Pose(pose.detach()).to(self.conf.device)
+            optimizer = torch.optim.Adam(
+                [
+                    {
+                        'params': [new_frame.pose.dR],
+                        'lr': self.conf.pose_optim_lr_rotation,
+                    },
+                    {
+                        'params': [new_frame.pose.dt],
+                        'lr': self.conf.pose_optim_lr_translation,
+                    },
+                    {
+                        'params': [self.reference_depthmap],
+                    },
+                ]
             )
-            rgb = outputs.rgbs[0]
-            depthmap = outputs.depthmaps[0]
+            n_iters = self.conf.num_tracking_iters
+
+        last_loss = float('inf')
 
         for i in (
             pbar := tqdm.trange(
-                self.conf.num_tracking_iters,
+                n_iters,
                 desc=f"[Tracking] frame {len(self.frames)}",
             )
         ):
-            pose_optimizer.zero_grad()
+            optimizer.zero_grad()
 
-            if self.conf.method == 'igs':
-                outputs = self.splats([new_frame.camera], [new_frame.pose])
-                rendered_rgb = outputs.rgbs[0]
-                betas = outputs.betas[0]
-                loss = self.tracking_loss(rendered_rgb, new_frame.img, betas)
-            elif self.conf.method == 'warp':
-                result, _normalized_warps, keep_mask = self.warp(
-                    last_keyframe.pose(),
-                    new_frame.pose(),
-                    rgb,
-                    depthmap,
-                )
-                result = result[keep_mask, ...]
-                gt = new_frame.img[keep_mask, ...]
-                loss = F.l1_loss(result, gt)
+            result, _normalized_warps, keep_mask = self.warp(
+                self.reference_frame.pose(),
+                new_frame.pose(),
+                self.reference_frame.img,
+                self.reference_depthmap,
+            )
+            result = result[keep_mask, ...]
+            gt = new_frame.img[keep_mask, ...]
+            loss = F.l1_loss(result, gt)
 
             loss += new_frame.pose.dR.norm() * self.conf.dR_regularization
             loss += new_frame.pose.dt.norm() * self.conf.dt_regularization
 
             loss.backward()
-            pose_optimizer.step()
+            optimizer.step()
 
             if 0 < ((last_loss - loss) / loss) < (1.0 / 2550.0):
                 # we've 'converged'!
@@ -221,38 +184,21 @@ class Frontend(mp.Process):
 
             last_loss = loss.item()
 
-        new_frame = new_frame.to(self.conf.device)
-        new_frame.pose = new_frame.pose.to(self.conf.device)
-        with torch.no_grad():
-            outputs = self.splats(
-                [new_frame.camera], [new_frame.pose], render_depth=True
-            )
-            rendered_rgb = outputs.rgbs[0]
-
-            new_frame.visible_gaussians = outputs.n_touched.sum(dim=0) > 0
-
-        self.save_tracking_stats(new_frame, outputs, last_loss)
+        self.save_tracking_stats(new_frame, last_loss)
         self.frames.append(new_frame.strip())
 
-        last_kf = list(self.keyframes.values())[-1]
-        if self.to_insert_keyframe(last_kf, new_frame, outputs):
-            self.add_keyframe(new_frame)
-
+        self.add_frame_to_backend(new_frame)
         return new_frame.pose()
 
-    def request_initialization(self, frame: Frame):
-        self.frames.append(frame.strip())
-        self.frozen_keyframes.append(frame.strip())
-        assert not self.initialized
-        self.map_queue.put([FrontendMessage.REQUEST_INITIALIZE, deepcopy(frame)])
+    def add_frame_to_backend(self, new_frame: Frame):
+        self.map_queue.put((FrontendMessage.ADD_FRAME, deepcopy(new_frame.strip())))
+        return
 
-    def add_keyframe(self, frame: Frame):
-        assert self.initialized
-        self.frozen_keyframes.append(frame)
-        self.map_queue.put([FrontendMessage.ADD_KEYFRAME, deepcopy(frame)])
-        self.waiting_for_sync = True
+    def sync(self, keyframes: dict[int, Frame], depthmap: torch.Tensor):
+        self.keyframes, self.last_kf_depths = keyframes, depthmap
+        return
 
-    def sync_maps(self, splats: GaussianSplattingData, keyframes: dict[int, Frame]):
+    def sync_at_end(self, splats: GaussianSplattingData, keyframes: dict[int, Frame]):
         self.splats, self.keyframes = splats, keyframes
         return
 
@@ -396,54 +342,20 @@ class Frontend(mp.Process):
             f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_depths/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final_depths.mp4"}'
         )
 
-    def save_tracking_stats(self, new_frame, outputs, loss):
-        rendered_depth = outputs.depthmaps[0]
-        rendered_beta = outputs.betas[0]
-        rendered_rgb = outputs.rgbs[0]
+    def save_tracking_stats(self, new_frame, loss):
+        depth = self.reference_depthmap
 
         rr.log(
             '/tracking/loss',
             rr.Scalar(loss),
         )
 
-        rr.log(
-            '/tracking/psnr',
-            rr.Scalar(
-                psnr(
-                    torch_image_to_np(rendered_rgb),
-                    torch_image_to_np(new_frame.img),
-                )
-            ),
-        )
-
-        rr.log(
-            '/tracking/ssim',
-            rr.Scalar(
-                ssim(
-                    torch_image_to_np(rendered_rgb),
-                    torch_image_to_np(new_frame.img),
-                    channel_axis=2,
-                )
-            ),
-        )
-
-        torch_to_pil(rendered_rgb).save(
-            self.output_dir / f'renders/{len(self.frames):08}.jpg'
-        )
         torch_to_pil(new_frame.img).save(
             self.output_dir / f'gt/{len(self.frames):08}.jpg'
         )
 
-        false_colormap(outputs.alphas[0, ..., 0]).save(
-            self.output_dir / f'alphas/{len(self.frames):08}.jpg'
-        )
-
-        false_colormap(
-            rendered_depth, mask=outputs.alphas[0, ..., 0] > 0.3, near=0.0001, far=2.5
-        ).save(self.output_dir / f'depths/{len(self.frames):08}.jpg')
-
-        false_colormap(rendered_beta).save(
-            self.output_dir / f'betas/{len(self.frames):08}.jpg'
+        false_colormap(depth).save(
+            self.output_dir / f'depths/{len(self.frames):08}.jpg'
         )
 
     @rr.shutdown_at_exit
@@ -456,50 +368,55 @@ class Frontend(mp.Process):
 
         self.waiting_for_sync = False
 
+        last_time_we_heard_from_backend = time.time()
+
+        self.done = False
+
         while True:
             match q_get(self.queue):
-                case [BackendMessage.SIGNAL_INITIALIZED]:
-                    self.logger.warning("Initialization successful!")
-                case [BackendMessage.SYNC, map_data, keyframes]:
-                    self.sync_maps(map_data, keyframes)
-                    self.initialized = True
+                case [BackendMessage.SYNC, keyframes, depthmap]:
+                    self.sync(keyframes, depthmap)
+                    print("We synced depthmaps")
+                    last_time_we_heard_from_backend = time.time()
+                case [BackendMessage.END_SYNC, map_data, keyframes]:
+                    print("We have end sync!")
+                    self.sync_at_end(map_data, keyframes)
                     self.waiting_for_sync = False
+                    last_time_we_heard_from_backend = time.time()
                 case None:
                     pass
                 case message_from_map:
                     self.logger.warning(f"Unknown {message_from_map=}")
+                    last_time_we_heard_from_backend = time.time()
 
             if self.waiting_for_sync:
                 continue
 
+            if (time.time() - last_time_we_heard_from_backend) > 30.0:
+                print('Looks like backend\'s dead')
+                break
+
+            if self.done:
+                break
             if self.sensor_queue.empty():
                 continue
             frame: Frame = self.sensor_queue.get()
             if frame is None:
                 # data stream exhausted
                 self.map_queue.put(None)
-                break
-
-            # TODO remove this
-            # if len(self.keyframes) >= 5:
-            #     self.map_queue.put(None)
-            #     break
+                self.done = True
+                self.waiting_for_sync = True
+                continue
 
             frame = frame.to(self.conf.device)
             if self.warp is None:
                 self.warp = Warp(
                     frame.camera.intrinsics, frame.camera.height, frame.camera.width
                 )
-            if not self.initialized:
-                self.request_initialization(frame)
-                self.keyframes[frame.index] = frame
-                self.waiting_for_sync = True
-            else:
-                self.track(frame)
+            self.track(frame)
 
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')
-
         self.dump_pointcloud()
         metrics = dict()
         metrics.update(self.evaluate_reconstruction())

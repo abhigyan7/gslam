@@ -90,7 +90,10 @@ class MapConfig:
     # pose graph optimization
     enable_pgo: bool = False
     pgo_loss_weight: float = 1.0
-    kf_cov: float = 0.95
+
+    kf_cov = 0.8
+    kf_oc = 0.4
+    kf_m = 0.08
 
 
 def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
@@ -131,7 +134,6 @@ class Backend(torch.multiprocessing.Process):
             0.01,
         )
         self.pruning_conditioning = PruneIllConditionedGaussians(3)
-        self.initialized: bool = False
 
         if not self.conf.use_betas:
             self.conf.betas_regularization_weight = 0.0
@@ -164,13 +166,7 @@ class Backend(torch.multiprocessing.Process):
 
     def optimize_map(self, n_iters: int = None):
         if n_iters is None:
-            n_iters = (
-                self.conf.num_iters_mapping
-                if self.initialized
-                else self.conf.num_iters_initialization
-            )
-
-        window_size = -1
+            n_iters = self.conf.num_iters_mapping
 
         radii = None
         n_touched = None
@@ -178,7 +174,6 @@ class Backend(torch.multiprocessing.Process):
         for step in (pbar := tqdm.trange(n_iters, disable=True)):
             self.total_step += 1
             window = self.optimization_window()
-            window_size = len(window)
             cameras = [x.camera for x in window]
             poses = torch.nn.ModuleList([x.pose for x in window])
             gt_imgs = create_batch(window, lambda x: x.img)
@@ -208,7 +203,9 @@ class Backend(torch.multiprocessing.Process):
             )
             betas_loss = self.splats.betas[visible_gaussians].mean()
             opacity_loss = self.splats.opacities[visible_gaussians].mean()
-            depth_loss = total_variation_loss(outputs.depthmaps, outputs.alphas[..., 0])
+            depth_loss = total_variation_loss(
+                outputs.depthmaps, outputs.alphas[..., 0] > 0.4
+            )
             ssim_loss = 1.0 - fused_ssim(
                 outputs.rgbs.permute(0, 3, 1, 2),
                 gt_imgs.permute(0, 3, 1, 2),
@@ -250,7 +247,7 @@ class Backend(torch.multiprocessing.Process):
             total_loss.backward()
 
             prune = True
-            if self.initialized and ((self.total_step % 66) == 0):
+            if (self.total_step % 466) == 0:
                 self.insertion_3dgs.step(
                     self.splats,
                     self.splat_optimizers,
@@ -278,7 +275,7 @@ class Backend(torch.multiprocessing.Process):
         if (
             self.conf.enable_visibility_pruning
             and prune
-            and (window_size >= self.conf.optim_window_last_n_keyframes)
+            and (len(self.keyframes) > 16)
             and (self.total_step % 200 == 0)
         ):
             radii = outputs.radii[: self.conf.optim_window_last_n_keyframes]
@@ -308,6 +305,7 @@ class Backend(torch.multiprocessing.Process):
         outputs = self.splats(
             [last_kf.camera],
             [last_kf.pose],
+            True,
         )
 
         last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
@@ -316,6 +314,10 @@ class Backend(torch.multiprocessing.Process):
                 self.splats.opacities.data[outputs.n_touched.sum(dim=0) > 0]
                 * self.conf.opacity_decay
             )
+
+        self.last_kf_depthmap = outputs.depthmaps[0]
+
+        self.sync()
         return
 
     def optimize_final(self):
@@ -366,10 +368,20 @@ class Backend(torch.multiprocessing.Process):
 
         return
 
-    def sync_with_frontend(self):
+    def sync(self):
         self.frontend_queue.put(
             (
                 BackendMessage.SYNC,
+                deepcopy(self.keyframes),
+                self.last_kf_depthmap.detach(),
+            )
+        )
+        return
+
+    def end_sync(self):
+        self.frontend_queue.put(
+            (
+                BackendMessage.END_SYNC,
                 self.splats.clone(),
                 deepcopy(self.keyframes),
             )
@@ -420,7 +432,6 @@ class Backend(torch.multiprocessing.Process):
 
     def initialize(self, frame: Frame):
         frame = frame.to(self.conf.device)
-        self.keyframes[frame.index] = frame
 
         self.splats = GaussianSplattingData.empty().to(self.conf.device)
         self.initialize_optimizers()
@@ -442,10 +453,6 @@ class Backend(torch.multiprocessing.Process):
             frame,
             10000,
         )
-
-        self.optimize_map()
-        self.logger.warning('Initialized')
-        self.initialized = True
 
         return
 
@@ -491,9 +498,10 @@ class Backend(torch.multiprocessing.Process):
             }
         )
 
-        add_constraint(self.pose_graph, *(list(self.keyframes.keys())[-2:]))
+        if len(self.keyframes) >= 2:
+            add_constraint(self.pose_graph, *(list(self.keyframes.keys())[-2:]))
 
-    def to_insert_keyframe(
+    def to_add_pg_edge(
         self,
         previous_keyframe: Frame,
         new_frame: Frame,
@@ -521,43 +529,76 @@ class Backend(torch.multiprocessing.Process):
         for i, j in combinations(sorted(self.keyframes), 2):
             if j in self.pose_graph[i]:
                 continue
-            if self.to_insert_keyframe(self.keyframes[i], self.keyframes[j]):
+            if self.to_add_pg_edge(self.keyframes[i], self.keyframes[j]):
                 print(f'Found loop closure! {i, j}')
                 add_constraint(self.pose_graph, i, j)
+
+    def to_insert_keyframe(
+        self,
+        previous_keyframe: Frame,
+        new_frame: Frame,
+    ):
+        outputs: RasterizationOutput = self.splats(
+            [new_frame.camera, previous_keyframe.camera],
+            [new_frame.pose, previous_keyframe.pose],
+            render_depth=True,
+        )
+
+        new_frame.visible_gaussians = outputs.radii[0] > 0
+        previous_keyframe.visible_gaussians = outputs.radii[1] > 0
+
+        intersection = torch.logical_and(
+            new_frame.visible_gaussians, previous_keyframe.visible_gaussians
+        )
+        union = torch.logical_or(
+            new_frame.visible_gaussians, previous_keyframe.visible_gaussians
+        )
+
+        iou = intersection.sum() / union.sum()
+        if iou < self.conf.kf_cov:
+            return True
+        pose_difference = torch.linalg.inv(new_frame.pose()) @ previous_keyframe.pose()
+        translation = pose_difference[:3, 3].pow(2.0).sum().pow(0.5).item()
+        median_depth = outputs.depthmaps[outputs.alphas[..., 0] > 0.1].median()
+        if translation > self.conf.kf_m * median_depth:
+            return True
+        return False
 
     def run(self):
         self.warp = None
         while True:
             if self.queue.empty():
-                if self.initialized:
+                if len(self.keyframes) > 0:
                     self.optimize_map()
-                    pass
                 time.sleep(0.02)
                 continue
             match self.queue.get():
-                case [FrontendMessage.REQUEST_INITIALIZE, frame]:
-                    self.initialize(frame)
-                    self.frontend_queue.put([BackendMessage.SIGNAL_INITIALIZED])
-                    self.sync_with_frontend()
-                case [FrontendMessage.ADD_KEYFRAME, frame]:
+                case [FrontendMessage.ADD_REFINED_DEPTHMAP, _depth, _frame_idx]:
+                    raise NotImplementedError()
+                case [FrontendMessage.ADD_FRAME, frame]:
                     if self.warp is None:
                         self.warp = Warp(
                             frame.camera.intrinsics,
                             frame.camera.height,
                             frame.camera.width,
                         )
-                    self.add_keyframe(frame)
+                    if len(self.keyframes) == 0:
+                        self.initialize(frame)
+                        self.add_keyframe(frame)
+                        continue
+                    last_keyframe = self.keyframes[sorted(self.keyframes.keys())[-1]]
+                    if self.to_insert_keyframe(last_keyframe, frame):
+                        self.add_keyframe(frame)
+                        print("We just added a new kf!")
                     if self.conf.enable_pgo:
                         self.add_pgo_constraints()
-                    self.optimize_map()
-                    self.sync_with_frontend()
                 case None:
                     print('Not running final optimization.')
                     # self.optimize_final()
-                    self.sync_with_frontend()
                     break
                 case message_from_frontend:
                     self.logger.warning(f"Unknown {message_from_frontend}")
 
+        self.end_sync()
         print(self.pose_graph)
         self.backend_done_event.set()
