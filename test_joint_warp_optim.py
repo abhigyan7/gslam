@@ -10,10 +10,9 @@ import torch.nn.functional as F
 import rerun as rr
 import numpy as np
 
-dataset = TumRGB('/mnt/data/datasets/rgbd_dataset_freiburg1_xyz')
+dataset = TumRGB('/mnt/data/datasets/rgbd_dataset_freiburg3_long_office_household/')
 
 device = 'cuda'
-kf1 = dataset[0].to(device)
 
 
 def log_frame(f: Frame):
@@ -32,7 +31,7 @@ def log_frame(f: Frame):
     )
 
     rr.log(
-        f'/tracking/pose_{i}/camera/image',
+        f'/tracking/pose_{i}/camera',
         rr.Pinhole(
             resolution=[f.camera.width, f.camera.height],
             focal_length=[
@@ -47,11 +46,6 @@ def log_frame(f: Frame):
     )
 
 
-depths = torch.ones(
-    [kf1.camera.height, kf1.camera.width], device=device, requires_grad=True
-).float()
-
-
 def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
     v_h = img[..., 1:, :] - img[..., :-1, :]
     v_w = img[..., :, 1:] - img[..., :, :-1]
@@ -63,7 +57,14 @@ def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.
     return tv_h + tv_w
 
 
-kfids = range(1, 8, 1)
+s_id = 200
+kf1 = dataset[s_id].to(device)
+depths = torch.ones(
+    [kf1.camera.height, kf1.camera.width], device=device, requires_grad=True
+).float()
+
+
+kfids = range(s_id, s_id + 8, 1)
 # kfs = [dataset[i].to(device) for i in [1]]
 # kfs = [dataset[i].to(device) for i in [1, 2]]
 # kfs = [dataset[i].to(device) for i in [1, 2, 3, 4]]
@@ -96,7 +97,7 @@ for kfid in kfids:
     kfs.append(kf)
     pose_optimizer = torch.optim.Adam([kf.pose.dR, kf.pose.dt])
 
-    for i in (pbar := tqdm.trange(50)):
+    for i in (pbar := tqdm.trange(100)):
         dm_optimizer.zero_grad()
         pose_optimizer.zero_grad()
         loss = 0
@@ -115,8 +116,14 @@ for kfid in kfids:
         loss.backward()
         pose_optimizer.step()
         dm_optimizer.step()
-    false_colormap(ddepths + depths).save(f'jpt/depth_{kfid}.png')
     false_colormap(ddepths.abs()).save(f'jpt/ddepth_{kfid}.png')
+    torch_to_pil((kf.img - result), minmax_norm=True).save(
+        f'jpt/residual_{kf.index}.png'
+    )
+    vis_depth = ddepths + depths
+    vis_depth[ddepths.abs() < 0.1] = 0.0
+    false_colormap(vis_depth).save(f'jpt/ddepth_vis_{kfid}.png')
+    false_colormap(ddepths + depths).save(f'jpt/depth_{kfid}.png')
     pose_optimizer.zero_grad()
     dm_optimizer.zero_grad()
 
@@ -136,9 +143,12 @@ with torch.no_grad():
         torch_to_pil((kf.img - result), minmax_norm=True).save(
             f'jpt/residual_{kf.index}.png'
         )
-        # torch_to_pil(keep_mask).save(f'jpt/mask_{kf.index}.png')
-        f = kf
-
+        torch_to_pil(keep_mask).save(f'jpt/mask_{kf.index}.png')
 log_frame(kf1)
 
-rr.log(f'/tracking/pose_{kf1.index}/camera/depth', rr.DepthImage(ddepths + depths))
+vis_depth = ddepths + depths
+vis_depth[ddepths.abs() < 0.1] = 0.0
+rr.log(f'/tracking/pose_{kfs[-1].index}/camera/depth', rr.DepthImage(vis_depth))
+rr.log(f'/tracking/pose_{kf1.index}/camera/depth', rr.DepthImage(kf1.gt_depth))
+rr.log(f'/tracking/pose_{kf1.index}/camera', rr.Image(kf.img))
+rr.log(f'/tracking/pose_{kfs[-1].index}/camera', rr.Image(kfs[-1].img))
