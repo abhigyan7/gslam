@@ -129,7 +129,7 @@ class InsertFromDepthMap(InsertionStrategy):
             alphas > self.min_alpha_for_depth, depths > 0
         )
 
-        n_valid_depth_pixels = valid_depth_region.shape.numel()
+        n_valid_depth_pixels = valid_depth_region.sum().detach().item()
         n_invalid_depth_pixels = depths.shape.numel() - n_valid_depth_pixels
 
         # prefer to add N nsplats in the region where we don't have geometry already

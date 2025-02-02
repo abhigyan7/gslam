@@ -439,7 +439,7 @@ class Frontend(mp.Process):
         )
 
         false_colormap(
-            rendered_depth, mask=outputs.alphas[0, ..., 0] > 0.3, near=0.0001, far=1.5
+            rendered_depth, mask=outputs.alphas[0, ..., 0] > 0.3, near=0.0001, far=2.5
         ).save(self.output_dir / f'depths/{len(self.frames):08}.jpg')
 
         false_colormap(rendered_beta).save(

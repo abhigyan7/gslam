@@ -90,7 +90,7 @@ class MapConfig:
     # pose graph optimization
     enable_pgo: bool = False
     pgo_loss_weight: float = 1.0
-    kf_cov: float = 0.8
+    kf_cov: float = 0.95
 
 
 def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
@@ -552,8 +552,8 @@ class Backend(torch.multiprocessing.Process):
                     self.optimize_map()
                     self.sync_with_frontend()
                 case None:
-                    print('Running final optimization.')
-                    self.optimize_final()
+                    print('Not running final optimization.')
+                    # self.optimize_final()
                     self.sync_with_frontend()
                     break
                 case message_from_frontend:
