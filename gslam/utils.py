@@ -116,3 +116,14 @@ class ForkedPdb(pdb.Pdb):
             pdb.Pdb.interaction(self, *args, **kwargs)
         finally:
             sys.stdin = _stdin
+
+
+def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+    v_h = img[..., 1:, :] - img[..., :-1, :]
+    v_w = img[..., :, 1:] - img[..., :, :-1]
+    if mask is not None:
+        v_h = v_h * mask[..., 1:, :]
+        v_w = v_w * mask[..., :, 1:]
+    tv_h = (v_h).pow(2).mean()
+    tv_w = (v_w).pow(2).mean()
+    return tv_h + tv_w

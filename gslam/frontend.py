@@ -24,11 +24,11 @@ from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, Pose
 from .trajectory import evaluate_trajectories
 from .utils import (
-    q_get,
     torch_image_to_np,
     torch_to_pil,
     false_colormap,
     ForkedPdb,
+    total_variation_loss,
 )
 from .warp import Warp
 
@@ -41,7 +41,7 @@ fpdb = ForkedPdb()
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 100
+    num_tracking_iters: int = 300
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'l1'
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
@@ -82,7 +82,6 @@ class Frontend(mp.Process):
         self.logger.addHandler(handler)
 
         self.frames: List[Frame] = []
-        self.frozen_keyframes: List[Frame] = []
 
         self.sensor_queue = sensor_queue
         self.frontend_done_event = frontend_done_event
@@ -165,22 +164,19 @@ class Frontend(mp.Process):
                 self.reference_frame.img,
                 self.reference_depthmap,
             )
-            result = result[keep_mask, ...]
-            gt = new_frame.img[keep_mask, ...]
-            loss = F.l1_loss(result, gt)
-
+            masked_result = result[keep_mask, ...]
+            masked_gt = new_frame.img[keep_mask, ...]
+            loss = F.l1_loss(masked_result, masked_gt)
+            pbar.set_description(
+                f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
+            )
             loss += new_frame.pose.dR.norm() * self.conf.dR_regularization
             loss += new_frame.pose.dt.norm() * self.conf.dt_regularization
 
+            loss += total_variation_loss(self.reference_depthmap) * 20.0
+
             loss.backward()
             optimizer.step()
-
-            if 0 < ((last_loss - loss) / loss) < (1.0 / 2550.0):
-                # we've 'converged'!
-                pbar.set_description(
-                    f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
-                )
-                break
 
             last_loss = loss.item()
 
@@ -188,6 +184,14 @@ class Frontend(mp.Process):
         self.frames.append(new_frame.strip())
 
         self.add_frame_to_backend(new_frame)
+
+        i = len(self.frames)
+        if n_iters == 0:
+            torch_to_pil(self.reference_frame.img).save(
+                self.output_dir / f"renders/{i:08}.jpg"
+            )
+        else:
+            torch_to_pil(result).save(self.output_dir / f"renders/{i:08}.jpg")
         return new_frame.pose()
 
     def add_frame_to_backend(self, new_frame: Frame):
@@ -195,7 +199,9 @@ class Frontend(mp.Process):
         return
 
     def sync(self, keyframes: dict[int, Frame], depthmap: torch.Tensor):
-        self.keyframes, self.last_kf_depths = keyframes, depthmap
+        self.keyframes = keyframes
+        self.reference_depthmap = depthmap.clone().requires_grad_(True)
+        self.reference_frame = keyframes[sorted(keyframes.keys())[-1]]
         return
 
     def sync_at_end(self, splats: GaussianSplattingData, keyframes: dict[int, Frame]):
@@ -285,7 +291,6 @@ class Frontend(mp.Process):
     def evaluate_trajectory(self) -> dict:
         fig, ates = evaluate_trajectories(
             {
-                'frozen': self.frozen_keyframes,
                 'optimized': self.keyframes.values(),
                 'tracking': self.frames,
             }
@@ -358,6 +363,19 @@ class Frontend(mp.Process):
             self.output_dir / f'depths/{len(self.frames):08}.jpg'
         )
 
+    def handle_message_from_backend(self, message):
+        match message:
+            case [BackendMessage.SYNC, keyframes, depthmap]:
+                self.sync(keyframes, depthmap)
+                print("We synced depthmaps")
+            case [BackendMessage.END_SYNC, map_data, keyframes]:
+                self.sync_at_end(map_data, keyframes)
+                self.waiting_for_end_sync = False
+                self.done = True
+                print("We have end sync!")
+            case message_from_map:
+                raise ValueError(f"Unknown {message_from_map=}")
+
     @rr.shutdown_at_exit
     def run(self):
         rr.init('gslam', recording_id='gslam_1')
@@ -366,54 +384,41 @@ class Frontend(mp.Process):
 
         self.warp = None
 
-        self.waiting_for_sync = False
+        self.waiting_for_end_sync = False
 
         last_time_we_heard_from_backend = time.time()
 
         self.done = False
 
         while True:
-            match q_get(self.queue):
-                case [BackendMessage.SYNC, keyframes, depthmap]:
-                    self.sync(keyframes, depthmap)
-                    print("We synced depthmaps")
-                    last_time_we_heard_from_backend = time.time()
-                case [BackendMessage.END_SYNC, map_data, keyframes]:
-                    print("We have end sync!")
-                    self.sync_at_end(map_data, keyframes)
-                    self.waiting_for_sync = False
-                    last_time_we_heard_from_backend = time.time()
-                case None:
-                    pass
-                case message_from_map:
-                    self.logger.warning(f"Unknown {message_from_map=}")
-                    last_time_we_heard_from_backend = time.time()
+            if not self.queue.empty():
+                self.handle_message_from_backend(self.queue.get())
+                last_time_we_heard_from_backend = time.time()
 
-            if self.waiting_for_sync:
+            if self.waiting_for_end_sync:
+                if (time.time() - last_time_we_heard_from_backend) > 30.0:
+                    print('Looks like backend\'s dead')
+                    break
                 continue
-
-            if (time.time() - last_time_we_heard_from_backend) > 30.0:
-                print('Looks like backend\'s dead')
-                break
 
             if self.done:
                 break
-            if self.sensor_queue.empty():
-                continue
-            frame: Frame = self.sensor_queue.get()
-            if frame is None:
-                # data stream exhausted
-                self.map_queue.put(None)
-                self.done = True
-                self.waiting_for_sync = True
-                continue
 
-            frame = frame.to(self.conf.device)
-            if self.warp is None:
-                self.warp = Warp(
-                    frame.camera.intrinsics, frame.camera.height, frame.camera.width
-                )
-            self.track(frame)
+            if not self.sensor_queue.empty():
+                frame: Frame = self.sensor_queue.get()
+                if frame is None:
+                    # data stream exhausted
+                    self.map_queue.put(None)
+                    self.waiting_for_end_sync = True
+                    last_time_we_heard_from_backend = time.time()
+                    continue
+
+                frame = frame.to(self.conf.device)
+                if self.warp is None:
+                    self.warp = Warp(
+                        frame.camera.intrinsics, frame.camera.height, frame.camera.width
+                    )
+                self.track(frame)
 
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')

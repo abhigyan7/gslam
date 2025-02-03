@@ -91,7 +91,7 @@ class MapConfig:
     enable_pgo: bool = False
     pgo_loss_weight: float = 1.0
 
-    kf_cov = 0.8
+    kf_cov = 0.9
     kf_oc = 0.4
     kf_m = 0.08
 
@@ -317,7 +317,6 @@ class Backend(torch.multiprocessing.Process):
 
         self.last_kf_depthmap = outputs.depthmaps[0]
 
-        self.sync()
         return
 
     def optimize_final(self):
@@ -590,6 +589,7 @@ class Backend(torch.multiprocessing.Process):
                     if self.to_insert_keyframe(last_keyframe, frame):
                         self.add_keyframe(frame)
                         print("We just added a new kf!")
+                        self.sync()
                     if self.conf.enable_pgo:
                         self.add_pgo_constraints()
                 case None:
