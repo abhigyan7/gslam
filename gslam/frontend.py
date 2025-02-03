@@ -28,7 +28,6 @@ from .utils import (
     torch_to_pil,
     false_colormap,
     ForkedPdb,
-    total_variation_loss,
 )
 from .warp import Warp
 
@@ -41,7 +40,7 @@ fpdb = ForkedPdb()
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 300
+    num_tracking_iters: int = 100
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'l1'
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
@@ -129,7 +128,7 @@ class Frontend(mp.Process):
             self.initialize(new_frame)
             n_iters = 0
         else:
-            pose = self.reference_frame.pose()
+            pose = self.frames[-1].pose()
             new_frame.pose = Pose(pose.detach()).to(self.conf.device)
             optimizer = torch.optim.Adam(
                 [
@@ -141,9 +140,9 @@ class Frontend(mp.Process):
                         'params': [new_frame.pose.dt],
                         'lr': self.conf.pose_optim_lr_translation,
                     },
-                    {
-                        'params': [self.reference_depthmap],
-                    },
+                    # {
+                    #     'params': [self.reference_depthmap],
+                    # },
                 ]
             )
             n_iters = self.conf.num_tracking_iters
@@ -167,18 +166,50 @@ class Frontend(mp.Process):
             masked_result = result[keep_mask, ...]
             masked_gt = new_frame.img[keep_mask, ...]
             loss = F.l1_loss(masked_result, masked_gt)
-            pbar.set_description(
-                f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
-            )
+            if 0 < ((last_loss - loss) / loss) < (1.0 / 2550.0):
+                # we've 'converged'!
+                pbar.set_description(
+                    f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
+                )
+                break
             loss += new_frame.pose.dR.norm() * self.conf.dR_regularization
             loss += new_frame.pose.dt.norm() * self.conf.dt_regularization
 
-            loss += total_variation_loss(self.reference_depthmap) * 20.0
+            # loss += total_variation_loss(self.reference_depthmap) * 20.0
 
             loss.backward()
             optimizer.step()
 
             last_loss = loss.item()
+
+            f = new_frame
+            i = f.index
+            q, t = f.pose.to_qt()
+            q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
+            t = t.detach().cpu().numpy().reshape(-1)
+            rr.log(
+                f'/tracking/pose_{i}',
+                rr.Transform3D(
+                    rotation=rr.datatypes.Quaternion(xyzw=q),
+                    translation=t,
+                    from_parent=True,
+                ),
+            )
+
+            rr.log(
+                f'/tracking/pose_{i}/camera',
+                rr.Pinhole(
+                    resolution=[f.camera.width, f.camera.height],
+                    focal_length=[
+                        f.camera.intrinsics[0, 0].item(),
+                        f.camera.intrinsics[1, 1].item(),
+                    ],
+                    principal_point=[
+                        f.camera.intrinsics[0, 2].item(),
+                        f.camera.intrinsics[1, 2].item(),
+                    ],
+                ),
+            )
 
         self.save_tracking_stats(new_frame, last_loss)
         self.frames.append(new_frame.strip())
