@@ -6,8 +6,26 @@ from PIL import Image
 from pyquaternion import Quaternion
 from torch.multiprocessing import JoinableQueue, Process
 from threading import Event
+import cv2
 
 from .primitives import Camera, Frame, Pose
+
+
+tum_intrinsics_params = {
+    "freiburg1": [517.3, 516.5, 318.6, 255.3, 0.2624, -0.9531, -0.0054, 0.0026, 1.1633],
+    "freiburg2": [
+        520.9,
+        521.0,
+        325.1,
+        249.7,
+        0.2312,
+        -0.7849,
+        -0.0033,
+        -0.0001,
+        0.9172,
+    ],
+    "freiburg3": [535.4, 539.2, 320.1, 247.6, 0, 0, 0, 0, 0],
+}
 
 
 class TumRGB:
@@ -54,6 +72,43 @@ class TumRGB:
             self.length = min(self.num_frames, seq_len)
         self.scale = scale
 
+        sequence_type = str(self.sequence_dir.parts[-1]).split('_')[2]
+        intrinsics = tum_intrinsics_params[sequence_type]
+
+        fx, fy, cx, cy, *d = intrinsics
+
+        K = np.array(
+            [
+                [
+                    fx,
+                    0,
+                    cx,
+                ],
+                [
+                    0,
+                    fy,
+                    cy,
+                ],
+                [
+                    0,
+                    0,
+                    1,
+                ],
+            ],
+            dtype=np.float32,
+        )
+
+        self.undistort_map_x, self.undistort_map_y = cv2.initUndistortRectifyMap(
+            K,
+            np.array(d),
+            None,
+            K,
+            (640, 480),
+            cv2.CV_32FC1,
+        )
+
+        self.Ks = torch.tensor(K).cuda()
+
     def __len__(self):
         return self.length
 
@@ -63,6 +118,12 @@ class TumRGB:
         rgb_filename = self.sequence_dir / self.rgb_frame_filenames[idx]
         im = Image.open(rgb_filename)
         image = im.resize((int(im.width / self.scale), int(im.height / self.scale)))
+        image = cv2.remap(
+            np.array(image),
+            self.undistort_map_x,
+            self.undistort_map_y,
+            cv2.INTER_LINEAR,
+        )
         image = np.asarray(np.float32(image)) / 255.0
         image = torch.Tensor(image).cuda()
         height, width, _channels = image.shape
@@ -75,14 +136,7 @@ class TumRGB:
 
         gt_pose = torch.Tensor(self.poses[idx, ...])
         ts = self.rgb_frame_timestamps[idx]
-        Ks = torch.FloatTensor(
-            [
-                [525.0, 0.0, 319.5],
-                [0.0, 525.5, 239.5],
-                [0.0, 0.0, 1.0],
-            ]
-        ).cuda()
-        camera = Camera(Ks / self.scale, height, width)
+        camera = Camera(self.Ks / self.scale, height, width)
         frame = Frame(
             image,
             ts,
