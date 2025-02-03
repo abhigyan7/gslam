@@ -12,12 +12,9 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 
-from PIL import Image
 import rerun as rr
 import tqdm
 
-from skimage.metrics import structural_similarity as ssim
-from skimage.metrics import peak_signal_noise_ratio as psnr
 
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
@@ -287,8 +284,8 @@ class Frontend(mp.Process):
                 ).compress(jpeg_quality=95),
             )
 
-        psnrs = []
-        ssims = []
+        # psnrs = []
+        # ssims = []
 
         for i, f in enumerate(tqdm.tqdm(self.frames, 'Rendering all frames')):
             outputs = self.splats(
@@ -307,22 +304,23 @@ class Frontend(mp.Process):
 
             if f.img_file is None:
                 continue
-            gt_img = np.array(Image.open(f.img_file))
-            psnrs.append(
-                psnr(
-                    torch_image_to_np(outputs.rgbs[0]),
-                    gt_img,
-                )
-            )
-            ssims.append(
-                ssim(
-                    torch_image_to_np(outputs.rgbs[0]),
-                    gt_img,
-                    channel_axis=2,
-                )
-            )
+            # gt_img = np.array(Image.open(f.img_file))
+            # psnrs.append(
+            #     psnr(
+            #         torch_image_to_np(outputs.rgbs[0]),
+            #         gt_img,
+            #     )
+            # )
+            # ssims.append(
+            #     ssim(
+            #         torch_image_to_np(outputs.rgbs[0]),
+            #         gt_img,
+            #         channel_axis=2,
+            #     )
+            # )
 
-        return {'ssim': np.mean(ssims), 'psnr': np.mean(psnrs)}
+        # return {'ssim': np.mean(ssims), 'psnr': np.mean(psnrs)}
+        return {'ssim': -1, 'psnr': -1}
 
     @torch.no_grad
     def evaluate_trajectory(self) -> dict:
@@ -369,19 +367,19 @@ class Frontend(mp.Process):
 
     def create_videos(self):
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final.mp4"}'
         )
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/gt/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"gt.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/gt/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"gt.mp4"}'
         )
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/renders/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"renders.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/renders/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"renders.mp4"}'
         )
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_renders/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final_renders.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_renders/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final_renders.mp4"}'
         )
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_depths/*.jpg" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final_depths.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_depths/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final_depths.mp4"}'
         )
 
     def save_tracking_stats(self, new_frame, loss):
