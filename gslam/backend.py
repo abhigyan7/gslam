@@ -12,12 +12,14 @@ from fused_ssim import fused_ssim
 import torch
 import torch.nn.functional as F
 import tqdm
+import nerfview
+import viser
 
 from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .pose_graph import add_constraint
-from .primitives import Frame, Pose
+from .primitives import Frame, Pose, Camera
 from .pruning import (
     PruneLowOpacity,
     PruneLargeGaussians,
@@ -141,6 +143,29 @@ class Backend(torch.multiprocessing.Process):
 
         self.pose_graph = defaultdict(set)
         self.total_step = 0
+
+        self.splats_mutex = torch.multiprocessing.Lock()
+        self.enable_viser_server = enable_viser_server
+
+    @torch.no_grad()
+    def viewer_render_fn(
+        self, camera_state: nerfview.CameraState, img_wh: tuple[int, int]
+    ):
+        device = self.conf.device
+        width, height = img_wh
+        c2w = camera_state.c2w
+        K = camera_state.get_K(img_wh)
+        c2w = torch.from_numpy(c2w).float().to(device)
+        K = torch.from_numpy(K).float().to(device)
+        viewmat = c2w.inverse()
+
+        camera = Camera(K, height, width)
+        pose = Pose(viewmat, False)
+
+        with self.splats_mutex:
+            outputs = self.splats([camera], [pose])
+        render_rgbs = outputs.rgbs[0, ...].cpu().numpy()
+        return render_rgbs
 
     def optimization_window(self) -> list[Frame]:
         window_size_total = (
@@ -276,7 +301,7 @@ class Backend(torch.multiprocessing.Process):
         if (
             self.conf.enable_visibility_pruning
             and prune
-            and (len(self.keyframes) > 16)
+            and (len(window) >= self.conf.optim_window_last_n_keyframes)
             and (self.total_step % 200 == 0)
         ):
             radii = outputs.radii[: self.conf.optim_window_last_n_keyframes]
@@ -566,10 +591,20 @@ class Backend(torch.multiprocessing.Process):
 
     def run(self):
         self.warp = None
+
+        if self.enable_viser_server:
+            self.server = viser.ViserServer(verbose=False)
+            self.viewer = nerfview.Viewer(
+                server=self.server,
+                render_fn=self.viewer_render_fn,
+                mode="training",
+            )
+
         while True:
             if self.queue.empty():
                 if len(self.keyframes) > 0:
-                    self.optimize_map()
+                    with self.splats_mutex:
+                        self.optimize_map()
                 time.sleep(0.02)
                 continue
             match self.queue.get():
@@ -584,14 +619,17 @@ class Backend(torch.multiprocessing.Process):
                         )
                     if len(self.keyframes) == 0:
                         self.initialize(frame)
-                        self.add_keyframe(frame)
+                        with self.splats_mutex:
+                            self.add_keyframe(frame)
                         continue
                     last_keyframe = self.keyframes[sorted(self.keyframes.keys())[-1]]
                     if self.to_insert_keyframe(last_keyframe, frame):
-                        self.add_keyframe(frame)
+                        with self.splats_mutex:
+                            self.add_keyframe(frame)
                         self.sync()
                     if self.conf.enable_pgo:
-                        self.add_pgo_constraints()
+                        with self.splats_mutex:
+                            self.add_pgo_constraints()
                 case None:
                     print('Not running final optimization.')
                     # self.optimize_final()

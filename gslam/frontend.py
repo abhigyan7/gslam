@@ -93,6 +93,7 @@ class Frontend(mp.Process):
         os.makedirs(self.output_dir / 'renders', exist_ok=True)
         os.makedirs(self.output_dir / 'alphas', exist_ok=True)
         os.makedirs(self.output_dir / 'depths', exist_ok=True)
+        os.makedirs(self.output_dir / 'ddepths', exist_ok=True)
         os.makedirs(self.output_dir / 'betas', exist_ok=True)
         os.makedirs(self.output_dir / 'final_renders', exist_ok=True)
         os.makedirs(self.output_dir / 'final_depths', exist_ok=True)
@@ -119,7 +120,8 @@ class Frontend(mp.Process):
         new_frame.pose = Pose(pose.detach()).to(self.conf.device)
         self.keyframes[new_frame.index] = new_frame
         self.reference_frame = new_frame
-        self.reference_depthmap = torch.ones_like(
+        self.reference_depthmap = torch.ones_like(new_frame.gt_depth)
+        self.reference_ddepthmap = torch.zeros_like(
             new_frame.gt_depth, requires_grad=True
         )
         return
@@ -142,7 +144,7 @@ class Frontend(mp.Process):
                         'lr': self.conf.pose_optim_lr_translation,
                     },
                     {
-                        'params': [self.reference_depthmap],
+                        'params': [self.reference_ddepthmap],
                     },
                 ]
             )
@@ -162,7 +164,7 @@ class Frontend(mp.Process):
                 self.reference_frame.pose(),
                 new_frame.pose(),
                 self.reference_frame.img,
-                self.reference_depthmap,
+                self.reference_depthmap + self.reference_ddepthmap,
             )
             masked_result = result[keep_mask, ...]
             masked_gt = new_frame.img[keep_mask, ...]
@@ -176,7 +178,7 @@ class Frontend(mp.Process):
             loss += new_frame.pose.dR.norm() * self.conf.dR_regularization
             loss += new_frame.pose.dt.norm() * self.conf.dt_regularization
 
-            loss += total_variation_loss(self.reference_depthmap) * 20.0
+            loss += total_variation_loss(self.reference_ddepthmap) * 30.0
 
             loss.backward()
             optimizer.step()
@@ -232,7 +234,8 @@ class Frontend(mp.Process):
 
     def sync(self, keyframes: dict[int, Frame], depthmap: torch.Tensor):
         self.keyframes = keyframes
-        self.reference_depthmap = depthmap.clone().requires_grad_(True)
+        self.reference_depthmap = depthmap.clone()
+        self.reference_ddepthmap = torch.zeros_like(depthmap).requires_grad_(True)
         self.reference_frame = keyframes[sorted(keyframes.keys())[-1]]
         return
 
@@ -297,7 +300,9 @@ class Frontend(mp.Process):
                 self.output_dir / f'final_renders/{i:08}.jpg'
             )
             false_colormap(
-                outputs.depthmaps[0], mask=outputs.alphas[0, ..., 0] > 0.3
+                outputs.depthmaps[0],
+                near=0.5,
+                far=2.0,
             ).save(self.output_dir / f'final_depths/{i:08}.jpg')
 
             if f.img_file is None:
@@ -380,7 +385,7 @@ class Frontend(mp.Process):
         )
 
     def save_tracking_stats(self, new_frame, loss):
-        depth = self.reference_depthmap
+        depth = self.reference_depthmap + self.reference_ddepthmap
 
         rr.log(
             '/tracking/loss',
@@ -393,6 +398,14 @@ class Frontend(mp.Process):
 
         false_colormap(depth).save(
             self.output_dir / f'depths/{len(self.frames):08}.jpg'
+        )
+
+        ddepth = self.reference_ddepthmap.clone()
+        ddepth = (ddepth - ddepth.min()) / (ddepth.max() - ddepth.min() + 1e-10)
+        ddepth[self.reference_ddepthmap.abs() < 0.01] = 0
+
+        false_colormap(ddepth).save(
+            self.output_dir / f'ddepths/{len(self.frames):08}.jpg'
         )
 
     def handle_message_from_backend(self, message):

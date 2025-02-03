@@ -50,7 +50,7 @@ def plot_trajectory(trajectories: list, labels: list[str], ax):
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     for trajectory, label in zip(trajectories, labels):
-        ax.plot(trajectory[..., 0], trajectory[..., 1], label=label)
+        ax.plot(trajectory[..., 1], trajectory[..., 2], label=label)
     ax.set_aspect('equal')
     ax.legend()
 
