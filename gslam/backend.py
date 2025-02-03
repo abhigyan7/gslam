@@ -114,6 +114,7 @@ class Backend(torch.multiprocessing.Process):
         queue: torch.multiprocessing.Queue,
         frontend_queue: torch.multiprocessing.Queue,
         backend_done_event: threading.Event,
+        enable_viser_server: bool = False,
     ):
         super().__init__()
         self.conf = conf
@@ -171,7 +172,7 @@ class Backend(torch.multiprocessing.Process):
         radii = None
         n_touched = None
 
-        for step in (pbar := tqdm.trange(n_iters, disable=True)):
+        for step in (pbar := tqdm.trange(n_iters)):
             self.total_step += 1
             window = self.optimization_window()
             cameras = [x.camera for x in window]
@@ -588,7 +589,6 @@ class Backend(torch.multiprocessing.Process):
                     last_keyframe = self.keyframes[sorted(self.keyframes.keys())[-1]]
                     if self.to_insert_keyframe(last_keyframe, frame):
                         self.add_keyframe(frame)
-                        print("We just added a new kf!")
                         self.sync()
                     if self.conf.enable_pgo:
                         self.add_pgo_constraints()

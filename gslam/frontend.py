@@ -28,6 +28,7 @@ from .utils import (
     torch_to_pil,
     false_colormap,
     ForkedPdb,
+    total_variation_loss,
 )
 from .warp import Warp
 
@@ -140,9 +141,9 @@ class Frontend(mp.Process):
                         'params': [new_frame.pose.dt],
                         'lr': self.conf.pose_optim_lr_translation,
                     },
-                    # {
-                    #     'params': [self.reference_depthmap],
-                    # },
+                    {
+                        'params': [self.reference_depthmap],
+                    },
                 ]
             )
             n_iters = self.conf.num_tracking_iters
@@ -175,7 +176,7 @@ class Frontend(mp.Process):
             loss += new_frame.pose.dR.norm() * self.conf.dR_regularization
             loss += new_frame.pose.dt.norm() * self.conf.dt_regularization
 
-            # loss += total_variation_loss(self.reference_depthmap) * 20.0
+            loss += total_variation_loss(self.reference_depthmap) * 20.0
 
             loss.backward()
             optimizer.step()
@@ -398,7 +399,6 @@ class Frontend(mp.Process):
         match message:
             case [BackendMessage.SYNC, keyframes, depthmap]:
                 self.sync(keyframes, depthmap)
-                print("We synced depthmaps")
             case [BackendMessage.END_SYNC, map_data, keyframes]:
                 self.sync_at_end(map_data, keyframes)
                 self.waiting_for_end_sync = False
