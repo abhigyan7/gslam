@@ -98,16 +98,19 @@ class TumRGB:
             dtype=np.float32,
         )
 
+        self.Ks, self.roi = cv2.getOptimalNewCameraMatrix(
+            K, np.array(d), (640, 480), 0, (640, 480)
+        )
         self.undistort_map_x, self.undistort_map_y = cv2.initUndistortRectifyMap(
             K,
             np.array(d),
             None,
-            K,
+            self.Ks,
             (640, 480),
             cv2.CV_32FC1,
         )
 
-        self.Ks = torch.tensor(K).cuda()
+        self.Ks = torch.tensor(self.Ks).cuda()
 
     def __len__(self):
         return self.length
@@ -124,6 +127,8 @@ class TumRGB:
             self.undistort_map_y,
             cv2.INTER_LINEAR,
         )
+        x, y, w, h = self.roi
+        image = image[y : y + h, x : x + w]
         image = np.asarray(np.float32(image)) / 255.0
         image = torch.Tensor(image).cuda()
         height, width, _channels = image.shape
