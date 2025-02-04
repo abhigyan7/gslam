@@ -15,6 +15,7 @@ import torch.nn.functional as F
 import rerun as rr
 import tqdm
 
+import matplotlib.pyplot as plt
 import numpy as np
 from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import peak_signal_noise_ratio as psnr
@@ -44,6 +45,8 @@ class TrackingConfig:
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'l1'
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
+
+    method: Literal['igs', 'warp'] = 'igs'
 
     dt_regularization: float = 0.01
     dR_regularization: float = 0.001
@@ -120,7 +123,14 @@ class Frontend(mp.Process):
             new_frame.gt_depth, requires_grad=True
         )
         self.reference_rgbs = new_frame.img
+
+        if self.conf.method == 'igs':
+            self.request_initialization(new_frame)
         return
+
+    def request_initialization(self, f: Frame):
+        self.map_queue.put((FrontendMessage.REQUEST_INIT, deepcopy(f)))
+        self.waiting_for_sync = True
 
     def track(self, new_frame: Frame):
         if len(self.frames) == 0:
@@ -139,41 +149,40 @@ class Frontend(mp.Process):
                         'params': [new_frame.pose.dt],
                         'lr': self.conf.pose_optim_lr_translation,
                     },
+                ]
+            )
+
+            if self.conf.method == 'warp':
+                optimizer.add_param_group(
                     {
                         'params': [self.reference_ddepthmap],
                     },
-                ]
-            )
+                )
+
             scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.99)
             n_iters = self.conf.num_tracking_iters
 
         last_loss = float('inf')
 
-        for i in (
-            pbar := tqdm.trange(
-                n_iters,
-                desc=f"[Tracking] frame {len(self.frames)}",
-            )
-        ):
-            optimizer.zero_grad()
-
-            result, _normalized_warps, keep_mask = self.warp(
-                self.reference_frame.pose(),
-                new_frame.pose(),
-                self.reference_frame.img,
-                # self.reference_rgbs,
-                self.reference_depthmap + self.reference_ddepthmap,
-                # self.reference_depthmap,
-            )
-            masked_result = result[keep_mask, ...]
-            masked_gt = new_frame.img[keep_mask, ...]
-            loss = F.l1_loss(masked_result, masked_gt)
-            if 0 < ((last_loss - loss) / loss) < (1.0 / 255.0):
-                # we've 'converged'!
-                pbar.set_description(
-                    f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
+        for i in tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}"):
+            if self.conf.method == 'igs':
+                outputs = self.splats([new_frame.camera], [new_frame.pose])
+                rendered_rgb = outputs.rgbs[0]
+                betas = outputs.betas[0]
+                loss = self.tracking_loss(rendered_rgb, new_frame.img, betas)
+            else:
+                rendered_rgb, _normalized_warps, keep_mask = self.warp(
+                    self.reference_frame.pose(),
+                    new_frame.pose(),
+                    self.reference_frame.img,
+                    # self.reference_rgbs,
+                    self.reference_depthmap + self.reference_ddepthmap,
+                    # self.reference_depthmap,
                 )
-                break
+                masked_result = rendered_rgb[keep_mask, ...]
+                masked_gt = new_frame.img[keep_mask, ...]
+                loss = F.l1_loss(masked_result, masked_gt)
+
             loss += new_frame.pose.dR.norm() * self.conf.dR_regularization
             loss += new_frame.pose.dt.norm() * self.conf.dt_regularization
 
@@ -182,37 +191,11 @@ class Frontend(mp.Process):
             loss.backward()
             optimizer.step()
             scheduler.step()
+            optimizer.zero_grad()
 
             last_loss = loss.item()
 
-            f = new_frame
-            i = f.index
-            q, t = f.pose.to_qt()
-            q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
-            t = t.detach().cpu().numpy().reshape(-1)
-            rr.log(
-                f'/tracking/pose_{i}',
-                rr.Transform3D(
-                    rotation=rr.datatypes.Quaternion(xyzw=q),
-                    translation=t,
-                    from_parent=True,
-                ),
-            )
-
-            rr.log(
-                f'/tracking/pose_{i}/camera',
-                rr.Pinhole(
-                    resolution=[f.camera.width, f.camera.height],
-                    focal_length=[
-                        f.camera.intrinsics[0, 0].item(),
-                        f.camera.intrinsics[1, 1].item(),
-                    ],
-                    principal_point=[
-                        f.camera.intrinsics[0, 2].item(),
-                        f.camera.intrinsics[1, 2].item(),
-                    ],
-                ),
-            )
+            self.save_tracking_stats(new_frame, loss.item())
 
         self.save_tracking_stats(new_frame, last_loss)
         self.frames.append(new_frame.strip())
@@ -225,7 +208,7 @@ class Frontend(mp.Process):
                 self.output_dir / f"renders/{i:08}.jpg"
             )
         else:
-            torch_to_pil(result).save(self.output_dir / f"renders/{i:08}.jpg")
+            torch_to_pil(rendered_rgb).save(self.output_dir / f"renders/{i:08}.jpg")
         return new_frame.pose()
 
     def add_frame_to_backend(self, new_frame: Frame):
@@ -278,6 +261,7 @@ class Frontend(mp.Process):
             static=True,
         )
 
+    @torch.no_grad()
     def evaluate_reconstruction(self):
         for i, kf in enumerate(
             tqdm.tqdm(self.keyframes.values(), 'Rendering all keyframes')
@@ -336,11 +320,12 @@ class Frontend(mp.Process):
     def evaluate_trajectory(self) -> dict:
         fig, ates = evaluate_trajectories(
             {
-                'optimized': self.keyframes.values(),
+                'keyframes': self.keyframes.values(),
                 'tracking': self.frames,
             }
         )
         fig.savefig(self.output_dir / 'traj.png')
+        plt.close(fig)
 
         for i, f in enumerate(self.frames):
             q, t = f.pose.to_qt()
@@ -420,6 +405,7 @@ class Frontend(mp.Process):
         match message:
             case [BackendMessage.SYNC, keyframes, depthmap, rgbs, splats]:
                 self.sync(keyframes, depthmap, rgbs, splats)
+                self.waiting_for_sync = False
             case [BackendMessage.END_SYNC, map_data, keyframes]:
                 self.sync_at_end(map_data, keyframes)
                 self.waiting_for_end_sync = False
@@ -437,6 +423,7 @@ class Frontend(mp.Process):
         self.warp = None
 
         self.waiting_for_end_sync = False
+        self.waiting_for_sync = False
 
         last_time_we_heard_from_backend = time.time()
 
@@ -451,6 +438,9 @@ class Frontend(mp.Process):
                 if (time.time() - last_time_we_heard_from_backend) > 30.0:
                     print('Looks like backend\'s dead')
                     break
+                continue
+
+            if self.waiting_for_sync:
                 continue
 
             if self.done:
@@ -478,6 +468,9 @@ class Frontend(mp.Process):
                     print(f'Saved Checkpoints to {checkpoint_file}')
 
                     metrics = dict()
+                    metrics['L'] = len(self.frames)
+                    metrics['C'] = len(self.keyframes)
+                    metrics['N'] = self.splats.means.shape[0]
                     metrics.update(self.evaluate_trajectory())
                     print(f'{metrics=}')
                     with open(self.output_dir / 'metrics.json', 'a') as f:
@@ -497,7 +490,7 @@ class Frontend(mp.Process):
         metrics['L'] = len(self.frames)
 
         print(f'{metrics=}')
-        with open(self.output_dir / 'metrics.json', 'w') as f:
+        with open(self.output_dir / 'metrics.json', 'a') as f:
             json.dump(metrics, f)
 
         checkpoint_file = self.output_dir / 'splats.ckpt'

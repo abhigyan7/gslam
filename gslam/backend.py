@@ -1,17 +1,18 @@
 from collections import defaultdict
+from copy import deepcopy
 from dataclasses import dataclass
 from itertools import combinations
 import logging
 import random
 import threading
-from copy import deepcopy
+import time
 from typing import Dict
 
 from fused_ssim import fused_ssim
+import nerfview
 import torch
 import torch.nn.functional as F
 import tqdm
-import nerfview
 import viser
 
 from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
@@ -610,7 +611,7 @@ class Backend(torch.multiprocessing.Process):
                 if len(self.keyframes) > 0:
                     with self.splats_mutex:
                         self.optimize_map()
-                # time.sleep(0.03)
+                time.sleep(0.03)
                 continue
             match self.queue.get():
                 case [FrontendMessage.ADD_REFINED_DEPTHMAP, _depth, _frame_idx]:
@@ -637,6 +638,13 @@ class Backend(torch.multiprocessing.Process):
                                 self.add_pgo_constraints()
                     if frame.index % 5 == 0:
                         self.sync()
+                case [FrontendMessage.REQUEST_INIT, frame]:
+                    self.initialize(frame)
+                    with self.splats_mutex:
+                        self.add_keyframe(frame)
+                        self.optimize_map(self.conf.num_iters_initialization)
+                    self.sync()
+                    continue
                 case None:
                     print('Not running final optimization.')
                     # self.optimize_final()

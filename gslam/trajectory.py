@@ -55,7 +55,9 @@ def plot_trajectory(trajectories: list, labels: list[str], ax):
     ax.legend()
 
 
-def evaluate_trajectories(trajectories: dict[str, list[Frame]]):
+def evaluate_trajectories(
+    trajectories: dict[str, list[Frame]],
+) -> tuple[plt.Figure, dict]:
     fig, axes = plt.subplots(1, len(trajectories))
     fig.set_figwidth(5 * len(trajectories))
     fig.set_figheight(5)
