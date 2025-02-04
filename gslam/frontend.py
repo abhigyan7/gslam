@@ -166,6 +166,9 @@ class Frontend(mp.Process):
             masked_result = result[keep_mask, ...]
             masked_gt = new_frame.img[keep_mask, ...]
             loss = F.l1_loss(masked_result, masked_gt)
+            pbar.set_description(
+                f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
+            )
             if 0 < ((last_loss - loss) / loss) < (1.0 / 2550.0):
                 # we've 'converged'!
                 pbar.set_description(

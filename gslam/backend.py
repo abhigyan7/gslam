@@ -43,9 +43,6 @@ class MapConfig:
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
 
-    # TODO this isn't being used
-    pose_optimization_regularization: float = 1e-6
-
     # 3dgs schedules means_lr, might need to look into this
     means_lr: float = 0.00016
     opacity_lr: float = 0.025
@@ -61,8 +58,7 @@ class MapConfig:
 
     initial_number_of_gaussians: int = 10_000
     initial_opacity: float = 0.9
-    initial_scale: float = 2.0
-    initial_extent: float = 1.0
+    initial_scale: float = 1.0
     initial_beta: float = 0.3
 
     device: str = 'cuda'
@@ -95,7 +91,7 @@ class MapConfig:
 
     kf_cov = 0.9
     kf_oc = 0.4
-    kf_m = 0.08
+    kf_m = 0.3
 
 
 def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
@@ -130,7 +126,11 @@ class Backend(torch.multiprocessing.Process):
         self.pruning_opacity = PruneLowOpacity(self.conf.opacity_pruning_threshold)
         self.pruning_size = PruneLargeGaussians(self.conf.size_pruning_threshold)
         self.insertion_depth_map = InsertFromDepthMap(
-            0.2, 0.5, 0.1, self.conf.initial_opacity, self.conf.initial_beta
+            0.1 * self.conf.initial_scale,
+            0.25 * self.conf.initial_scale,
+            0.1,
+            self.conf.initial_opacity,
+            self.conf.initial_beta,
         )
         self.insertion_3dgs = InsertUsingImagePlaneGradients(
             0.0002,
@@ -605,7 +605,7 @@ class Backend(torch.multiprocessing.Process):
                 if len(self.keyframes) > 0:
                     with self.splats_mutex:
                         self.optimize_map()
-                time.sleep(0.02)
+                time.sleep(0.03)
                 continue
             match self.queue.get():
                 case [FrontendMessage.ADD_REFINED_DEPTHMAP, _depth, _frame_idx]:

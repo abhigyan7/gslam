@@ -29,7 +29,7 @@ tum_intrinsics_params = {
 
 
 class TumRGB:
-    def __init__(self, sequence_dir: Path, seq_len: int = -1, scale: float = 1.0):
+    def __init__(self, sequence_dir: Path, seq_len: int = -1):
         self.sequence_dir = Path(sequence_dir)
 
         rgb_frames = np.loadtxt(self.sequence_dir / "rgb.txt", np.str_)
@@ -70,7 +70,6 @@ class TumRGB:
         self.length = self.num_frames
         if seq_len > 0:
             self.length = min(self.num_frames, seq_len)
-        self.scale = scale
 
         sequence_type = str(self.sequence_dir.parts[-1]).split('_')[2]
         intrinsics = tum_intrinsics_params[sequence_type]
@@ -120,9 +119,8 @@ class TumRGB:
             raise StopIteration
         rgb_filename = self.sequence_dir / self.rgb_frame_filenames[idx]
         im = Image.open(rgb_filename)
-        image = im.resize((int(im.width / self.scale), int(im.height / self.scale)))
         image = cv2.remap(
-            np.array(image),
+            np.array(im),
             self.undistort_map_x,
             self.undistort_map_y,
             cv2.INTER_LINEAR,
@@ -135,13 +133,13 @@ class TumRGB:
 
         depth_filename = self.sequence_dir / self.depth_frame_filenames[idx]
         depth_im = Image.open(depth_filename)
-        depth_im = depth_im.resize((width, height))
         depth_image = np.asarray(depth_im)
+        depth_image = depth_image[y : y + h, x : x + w]
         depth_image = torch.Tensor(depth_image.copy()).cuda() / 5000.0
 
         gt_pose = torch.Tensor(self.poses[idx, ...])
         ts = self.rgb_frame_timestamps[idx]
-        camera = Camera(self.Ks / self.scale, height, width)
+        camera = Camera(self.Ks.clone(), height, width)
         frame = Frame(
             image,
             ts,

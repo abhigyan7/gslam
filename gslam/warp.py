@@ -44,6 +44,7 @@ class Warp(torch.nn.Module):
         T = f1_pose @ torch.linalg.inv(f2_pose)
 
         backprojected_points = d1.t().unsqueeze(-1).unsqueeze(-1) * unprojected
+        backprojected_points += 1e-10
         backprojected_points_in_new_frame = T[:3, :3] @ backprojected_points
 
         backprojected_points_in_new_frame = (
