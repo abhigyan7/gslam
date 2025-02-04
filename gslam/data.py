@@ -1,4 +1,5 @@
 from pathlib import Path
+import tempfile
 
 import numpy as np
 import torch
@@ -110,6 +111,10 @@ class TumRGB:
         )
 
         self.Ks = torch.tensor(self.Ks).cuda()
+        # we need to hold on to this because once this is gc'd
+        # python deletes the tmpdir
+        self.tmpdir_object = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self.tmpdir_object.name)
 
     def __len__(self):
         return self.length
@@ -127,6 +132,10 @@ class TumRGB:
         )
         x, y, w, h = self.roi
         image = image[y : y + h, x : x + w]
+
+        # save undistorted gt_img to tmp because we'll need it to evaluate reconstruction later
+        gt_img_save_path = self.tmpdir / rgb_filename.parts[-1]
+        cv2.imwrite(str(gt_img_save_path), image[..., ::-1])
         image = np.asarray(np.float32(image)) / 255.0
         image = torch.Tensor(image).cuda()
         height, width, _channels = image.shape
@@ -147,7 +156,7 @@ class TumRGB:
             Pose(),
             gt_pose,
             gt_depth=depth_image,
-            img_file=rgb_filename,
+            img_file=gt_img_save_path,
             index=idx,
         )
         return frame

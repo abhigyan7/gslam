@@ -15,6 +15,10 @@ import torch.nn.functional as F
 import rerun as rr
 import tqdm
 
+import numpy as np
+from skimage.metrics import structural_similarity as ssim
+from skimage.metrics import peak_signal_noise_ratio as psnr
+from PIL import Image
 
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
@@ -30,25 +34,19 @@ from .utils import (
 from .warp import Warp
 
 
-import numpy as np
-
 fpdb = ForkedPdb()
 
 
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 100
+    num_tracking_iters: int = 150
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'l1'
     pose_optim_lr_translation: float = 0.001
     pose_optim_lr_rotation: float = 0.003
 
     dt_regularization: float = 0.01
     dR_regularization: float = 0.001
-
-    kf_cov = 0.8
-    kf_oc = 0.4
-    kf_m = 0.08
 
 
 class Frontend(mp.Process):
@@ -121,6 +119,7 @@ class Frontend(mp.Process):
         self.reference_ddepthmap = torch.zeros_like(
             new_frame.gt_depth, requires_grad=True
         )
+        self.reference_rgbs = new_frame.img
         return
 
     def track(self, new_frame: Frame):
@@ -145,6 +144,7 @@ class Frontend(mp.Process):
                     },
                 ]
             )
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.99)
             n_iters = self.conf.num_tracking_iters
 
         last_loss = float('inf')
@@ -161,15 +161,14 @@ class Frontend(mp.Process):
                 self.reference_frame.pose(),
                 new_frame.pose(),
                 self.reference_frame.img,
+                # self.reference_rgbs,
                 self.reference_depthmap + self.reference_ddepthmap,
+                # self.reference_depthmap,
             )
             masked_result = result[keep_mask, ...]
             masked_gt = new_frame.img[keep_mask, ...]
             loss = F.l1_loss(masked_result, masked_gt)
-            pbar.set_description(
-                f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
-            )
-            if 0 < ((last_loss - loss) / loss) < (1.0 / 2550.0):
+            if 0 < ((last_loss - loss) / loss) < (1.0 / 255.0):
                 # we've 'converged'!
                 pbar.set_description(
                     f"[Tracking] frame {len(self.frames)}, loss: {loss.item():.3f}"
@@ -182,6 +181,7 @@ class Frontend(mp.Process):
 
             loss.backward()
             optimizer.step()
+            scheduler.step()
 
             last_loss = loss.item()
 
@@ -232,11 +232,14 @@ class Frontend(mp.Process):
         self.map_queue.put((FrontendMessage.ADD_FRAME, deepcopy(new_frame.strip())))
         return
 
-    def sync(self, keyframes: dict[int, Frame], depthmap: torch.Tensor):
+    def sync(
+        self, keyframes: dict[int, Frame], depthmap: torch.Tensor, rgbs: torch.Tensor
+    ):
         self.keyframes = keyframes
         self.reference_depthmap = depthmap.clone()
         self.reference_ddepthmap = torch.zeros_like(depthmap).requires_grad_(True)
         self.reference_frame = keyframes[sorted(keyframes.keys())[-1]]
+        self.reference_rgbs = rgbs
         return
 
     def sync_at_end(self, splats: GaussianSplattingData, keyframes: dict[int, Frame]):
@@ -287,8 +290,8 @@ class Frontend(mp.Process):
                 ).compress(jpeg_quality=95),
             )
 
-        # psnrs = []
-        # ssims = []
+        psnrs = []
+        ssims = []
 
         for i, f in enumerate(tqdm.tqdm(self.frames, 'Rendering all frames')):
             outputs = self.splats(
@@ -307,23 +310,22 @@ class Frontend(mp.Process):
 
             if f.img_file is None:
                 continue
-            # gt_img = np.array(Image.open(f.img_file))
-            # psnrs.append(
-            #     psnr(
-            #         torch_image_to_np(outputs.rgbs[0]),
-            #         gt_img,
-            #     )
-            # )
-            # ssims.append(
-            #     ssim(
-            #         torch_image_to_np(outputs.rgbs[0]),
-            #         gt_img,
-            #         channel_axis=2,
-            #     )
-            # )
+            gt_img = np.array(Image.open(f.img_file))
+            psnrs.append(
+                psnr(
+                    torch_image_to_np(outputs.rgbs[0]),
+                    gt_img,
+                )
+            )
+            ssims.append(
+                ssim(
+                    torch_image_to_np(outputs.rgbs[0]),
+                    gt_img,
+                    channel_axis=2,
+                )
+            )
 
-        # return {'ssim': np.mean(ssims), 'psnr': np.mean(psnrs)}
-        return {'ssim': -1, 'psnr': -1}
+        return {'ssim': np.mean(ssims), 'psnr': np.mean(psnrs)}
 
     @torch.no_grad
     def evaluate_trajectory(self) -> dict:
@@ -411,8 +413,8 @@ class Frontend(mp.Process):
 
     def handle_message_from_backend(self, message):
         match message:
-            case [BackendMessage.SYNC, keyframes, depthmap]:
-                self.sync(keyframes, depthmap)
+            case [BackendMessage.SYNC, keyframes, depthmap, rgbs]:
+                self.sync(keyframes, depthmap, rgbs)
             case [BackendMessage.END_SYNC, map_data, keyframes]:
                 self.sync_at_end(map_data, keyframes)
                 self.waiting_for_end_sync = False

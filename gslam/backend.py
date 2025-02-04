@@ -4,7 +4,6 @@ from itertools import combinations
 import logging
 import random
 import threading
-import time
 from copy import deepcopy
 from typing import Dict
 
@@ -69,8 +68,11 @@ class MapConfig:
     num_iters_mapping: int = 15
     num_iters_initialization: int = 500
 
-    opacity_pruning_threshold: float = 0.7
+    opacity_pruning_threshold: float = 0.5
     size_pruning_threshold: int = 256
+
+    prune_every: int = 199
+    insert_every: int = 600
 
     reset_opacity: bool = False
     opacity_after_reset: float = 0.5
@@ -273,7 +275,7 @@ class Backend(torch.multiprocessing.Process):
             total_loss.backward()
 
             prune = True
-            if (self.total_step % 466) == 0:
+            if (self.total_step % 266) == 0:
                 self.insertion_3dgs.step(
                     self.splats,
                     self.splat_optimizers,
@@ -342,6 +344,7 @@ class Backend(torch.multiprocessing.Process):
             )
 
         self.last_kf_depthmap = outputs.depthmaps[0]
+        self.last_kf_rgbs = outputs.rgbs[0]
 
         return
 
@@ -399,6 +402,7 @@ class Backend(torch.multiprocessing.Process):
                 BackendMessage.SYNC,
                 deepcopy(self.keyframes),
                 self.last_kf_depthmap.detach(),
+                self.last_kf_rgbs.detach(),
             )
         )
         return
@@ -605,7 +609,7 @@ class Backend(torch.multiprocessing.Process):
                 if len(self.keyframes) > 0:
                     with self.splats_mutex:
                         self.optimize_map()
-                time.sleep(0.03)
+                # time.sleep(0.03)
                 continue
             match self.queue.get():
                 case [FrontendMessage.ADD_REFINED_DEPTHMAP, _depth, _frame_idx]:
@@ -627,9 +631,11 @@ class Backend(torch.multiprocessing.Process):
                         with self.splats_mutex:
                             self.add_keyframe(frame)
                         self.sync()
-                    if self.conf.enable_pgo:
-                        with self.splats_mutex:
-                            self.add_pgo_constraints()
+                        if self.conf.enable_pgo:
+                            with self.splats_mutex:
+                                self.add_pgo_constraints()
+                    if frame.index % 5 == 0:
+                        self.sync()
                 case None:
                     print('Not running final optimization.')
                     # self.optimize_final()
