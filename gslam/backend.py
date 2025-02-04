@@ -85,7 +85,7 @@ class MapConfig:
 
     min_visibility: int = 3
     visibility_pruning_window_size: int = 3
-    enable_visibility_pruning: bool = True
+    enable_visibility_pruning: bool = False
 
     # pose graph optimization
     enable_pgo: bool = False
@@ -403,6 +403,7 @@ class Backend(torch.multiprocessing.Process):
                 deepcopy(self.keyframes),
                 self.last_kf_depthmap.detach(),
                 self.last_kf_rgbs.detach(),
+                deepcopy(self.splats),
             )
         )
         return

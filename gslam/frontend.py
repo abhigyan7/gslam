@@ -229,17 +229,22 @@ class Frontend(mp.Process):
         return new_frame.pose()
 
     def add_frame_to_backend(self, new_frame: Frame):
-        self.map_queue.put((FrontendMessage.ADD_FRAME, deepcopy(new_frame.strip())))
+        self.map_queue.put((FrontendMessage.ADD_FRAME, deepcopy(new_frame)))
         return
 
     def sync(
-        self, keyframes: dict[int, Frame], depthmap: torch.Tensor, rgbs: torch.Tensor
+        self,
+        keyframes: dict[int, Frame],
+        depthmap: torch.Tensor,
+        rgbs: torch.Tensor,
+        splats: GaussianSplattingData,
     ):
         self.keyframes = keyframes
         self.reference_depthmap = depthmap.clone()
         self.reference_ddepthmap = torch.zeros_like(depthmap).requires_grad_(True)
         self.reference_frame = keyframes[sorted(keyframes.keys())[-1]]
         self.reference_rgbs = rgbs
+        self.splats = splats
         return
 
     def sync_at_end(self, splats: GaussianSplattingData, keyframes: dict[int, Frame]):
@@ -413,8 +418,8 @@ class Frontend(mp.Process):
 
     def handle_message_from_backend(self, message):
         match message:
-            case [BackendMessage.SYNC, keyframes, depthmap, rgbs]:
-                self.sync(keyframes, depthmap, rgbs)
+            case [BackendMessage.SYNC, keyframes, depthmap, rgbs, splats]:
+                self.sync(keyframes, depthmap, rgbs, splats)
             case [BackendMessage.END_SYNC, map_data, keyframes]:
                 self.sync_at_end(map_data, keyframes)
                 self.waiting_for_end_sync = False
@@ -466,6 +471,18 @@ class Frontend(mp.Process):
                         frame.camera.intrinsics, frame.camera.height, frame.camera.width
                     )
                 self.track(frame)
+
+                if len(self.frames) % 30 == 0:
+                    checkpoint_file = self.output_dir / 'splats.ckpt'
+                    torch.save(self.splats, checkpoint_file)
+                    print(f'Saved Checkpoints to {checkpoint_file}')
+
+                    metrics = dict()
+                    metrics.update(self.evaluate_trajectory())
+                    print(f'{metrics=}')
+                    with open(self.output_dir / 'metrics.json', 'a') as f:
+                        json.dump(metrics, f)
+                        f.write('\n')
 
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')

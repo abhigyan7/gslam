@@ -312,7 +312,7 @@ class Frame:
 
     def strip(self):
         return Frame(
-            self.img,
+            None,
             self.timestamp,
             self.camera,
             Pose(self.pose()),
