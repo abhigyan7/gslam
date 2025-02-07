@@ -425,6 +425,7 @@ class Backend(torch.multiprocessing.Process):
                 self.last_kf_depthmap.detach(),
                 self.last_kf_rgbs.detach(),
                 deepcopy(self.splats),
+                deepcopy(self.pose_graph),
             )
         )
         return
@@ -483,7 +484,7 @@ class Backend(torch.multiprocessing.Process):
 
     def initialize(self, frame: Frame):
         frame = frame.to(self.conf.device)
-
+        self.keyframes[frame.index] = frame
         self.splats = GaussianSplattingData.empty().to(self.conf.device)
         self.initialize_optimizers()
 
@@ -645,8 +646,6 @@ class Backend(torch.multiprocessing.Process):
                         )
                     if len(self.keyframes) == 0:
                         self.initialize(frame)
-                        with self.splats_mutex:
-                            self.add_keyframe(frame)
                         continue
                     last_keyframe = self.keyframes[sorted(self.keyframes.keys())[-1]]
                     if self.to_insert_keyframe(last_keyframe, frame):
@@ -661,7 +660,6 @@ class Backend(torch.multiprocessing.Process):
                 case [FrontendMessage.REQUEST_INIT, frame]:
                     self.initialize(frame)
                     with self.splats_mutex:
-                        self.add_keyframe(frame)
                         self.optimize_map(self.conf.num_iters_initialization)
                     self.sync()
                     continue

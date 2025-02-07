@@ -164,7 +164,7 @@ class Frontend(mp.Process):
 
         last_drdt = np.zeros((6,))
         new_drdt = np.zeros((6,))
-        _loss = -1.0
+        _loss = 0.0
 
         for i in (
             pbar := tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}")
@@ -195,6 +195,9 @@ class Frontend(mp.Process):
             loss += new_frame.pose.dt.norm() * self.conf.dt_regularization
 
             loss += total_variation_loss(self.reference_ddepthmap) * 30.0
+            pbar.set_description(
+                f"[Tracking] frame {len(self.frames)}| loss: {_loss:.3f}"
+            )
 
             loss.backward()
             optimizer.step()
@@ -205,12 +208,9 @@ class Frontend(mp.Process):
             new_drdt[3:] = new_frame.pose.dt.detach().cpu().numpy()
 
             if np.linalg.norm(last_drdt - new_drdt) < 1e-5:
-                # we've converged
-                pbar.set_description(
-                    f"[Tracking] frame {len(self.frames)}| loss: {_loss:.3f}"
-                )
                 break
 
+        self.log_frame(new_frame)
         self.save_tracking_stats(new_frame, _loss)
         self.frames.append(new_frame.strip())
 
@@ -235,6 +235,7 @@ class Frontend(mp.Process):
         depthmap: torch.Tensor,
         rgbs: torch.Tensor,
         splats: GaussianSplattingData,
+        pose_graph: dict[int, set],
     ):
         self.keyframes = keyframes
         self.reference_depthmap = depthmap.clone()
@@ -242,6 +243,25 @@ class Frontend(mp.Process):
         self.reference_frame = keyframes[sorted(keyframes.keys())[-1]]
         self.reference_rgbs = rgbs
         self.splats = splats
+        self.pose_graph = pose_graph
+
+        for kf in self.keyframes.values():
+            self.log_frame(kf, name=f'/tracking/kf/{kf.index}')
+        line_strips = []
+        for kf_i in self.pose_graph:
+            for kf_j in self.pose_graph[kf_i]:
+                if kf_i > kf_j:
+                    continue
+                t1 = self.keyframes[kf_i].pose().inverse()[:3, 3].detach().cpu().numpy()
+                t2 = self.keyframes[kf_j].pose().inverse()[:3, 3].detach().cpu().numpy()
+                line_strips.append(np.vstack((t1, t2)).tolist())
+
+        rr.log(
+            '/tracking/pose_graph',
+            rr.LineStrips3D(line_strips, colors=[[255, 255, 255]]),
+        )
+
+        self.dump_pointcloud()
         return
 
     def sync_at_end(self, splats: GaussianSplattingData, keyframes: dict[int, Frame]):
@@ -272,7 +292,6 @@ class Frontend(mp.Process):
                 .cpu()
                 .numpy(),
             ),
-            static=True,
         )
 
     @torch.no_grad()
@@ -330,22 +349,22 @@ class Frontend(mp.Process):
 
         return {'ssim': np.mean(ssims), 'psnr': np.mean(psnrs)}
 
-    def log_frame(self, f: Frame) -> None:
+    def log_frame(self, f: Frame, name: str = "/tracking/pose") -> None:
         q, t = f.pose.to_qt()
         q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
         t = t.detach().cpu().numpy().reshape(-1)
         rr.log(
-            "/tracking/pose",
+            name,
             rr.Transform3D(
                 rotation=rr.datatypes.Quaternion(xyzw=q),
                 translation=t,
                 from_parent=True,
             ),
         )
-        rr.log("/tracking/pose", rr.ViewCoordinates.RDF)  # X=Right, Y=Down, Z=Forward
+        # rr.log("/tracking/pose", rr.ViewCoordinates.RDF)  # X=Right, Y=Down, Z=Forward
 
         rr.log(
-            "/tracking/pose/image",
+            f"{name}/image",
             rr.Pinhole(
                 resolution=[f.camera.width, f.camera.height],
                 focal_length=[
@@ -414,8 +433,8 @@ class Frontend(mp.Process):
 
     def handle_message_from_backend(self, message):
         match message:
-            case [BackendMessage.SYNC, keyframes, depthmap, rgbs, splats]:
-                self.sync(keyframes, depthmap, rgbs, splats)
+            case [BackendMessage.SYNC, keyframes, depthmap, rgbs, splats, pose_graph]:
+                self.sync(keyframes, depthmap, rgbs, splats, pose_graph)
                 self.waiting_for_sync = False
             case [BackendMessage.END_SYNC, map_data, keyframes]:
                 self.sync_at_end(map_data, keyframes)
@@ -429,7 +448,7 @@ class Frontend(mp.Process):
     def run(self):
         rr.init('gslam', recording_id='gslam_1')
         rr.save(self.output_dir / 'rr-fe.rrd')
-        rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
+        rr.log("/tracking", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
         self.warp = None
 
