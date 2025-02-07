@@ -6,7 +6,7 @@ import logging
 import random
 import threading
 import time
-from typing import Dict
+from typing import Dict, assert_never
 
 from fused_ssim import fused_ssim
 import nerfview
@@ -14,6 +14,8 @@ import torch
 import torch.nn.functional as F
 import tqdm
 import viser
+
+import numpy as np
 
 from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
 from .map import GaussianSplattingData
@@ -28,6 +30,7 @@ from .pruning import (
 )
 from .rasterization import RasterizationOutput
 from .utils import create_batch, ForkedPdb
+from .viewer import Viewer
 from .warp import Warp
 
 forked_pdb = ForkedPdb()
@@ -80,7 +83,7 @@ class MapConfig:
 
     # used in the final optimization
     ssim_weight: float = 0.2  # in [0,1]
-    num_iters_final: int = 200
+    num_iters_final: int = 2000
 
     use_betas: bool = False
 
@@ -90,7 +93,7 @@ class MapConfig:
 
     # pose graph optimization
     enable_pgo: bool = False
-    pgo_loss_weight: float = 1.0
+    pgo_loss_weight: float = 0.1
 
     kf_cov = 0.9
     kf_oc = 0.4
@@ -152,7 +155,9 @@ class Backend(torch.multiprocessing.Process):
 
     @torch.no_grad()
     def viewer_render_fn(
-        self, camera_state: nerfview.CameraState, img_wh: tuple[int, int]
+        self,
+        camera_state: nerfview.CameraState,
+        img_wh: tuple[int, int],
     ):
         device = self.conf.device
         width, height = img_wh
@@ -166,8 +171,23 @@ class Backend(torch.multiprocessing.Process):
         pose = Pose(viewmat, False)
 
         with self.splats_mutex:
-            outputs = self.splats([camera], [pose])
-        render_rgbs = outputs.rgbs[0, ...].cpu().numpy()
+            outputs = self.splats([camera], [pose], True)
+
+        match self.viewer.state.target_type:
+            case "rgb":
+                render_rgbs = outputs.rgbs[0, ...].cpu().numpy()
+                render_depths = outputs.depthmaps[0, ...].cpu().numpy()
+                return render_rgbs, render_depths
+            case "n_touched":
+                render_rgbs = outputs.n_touched[0, ...].cpu().numpy()
+                print(f'{render_rgbs.shape=}')
+                render_rgbs = np.tile(render_rgbs / render_rgbs.max(), (1, 1, 3))
+                print(f'{render_rgbs.shape=}')
+                print()
+                render_depths = outputs.depthmaps[0, ...].cpu().numpy()
+            case x:
+                assert_never(x)
+
         return render_rgbs
 
     def optimization_window(self) -> list[Frame]:
@@ -600,7 +620,7 @@ class Backend(torch.multiprocessing.Process):
 
         if self.enable_viser_server:
             self.server = viser.ViserServer(verbose=False)
-            self.viewer = nerfview.Viewer(
+            self.viewer = Viewer(
                 server=self.server,
                 render_fn=self.viewer_render_fn,
                 mode="training",

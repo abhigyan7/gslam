@@ -162,9 +162,15 @@ class Frontend(mp.Process):
             scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.99)
             n_iters = self.conf.num_tracking_iters
 
-        last_loss = float('inf')
+        last_drdt = np.zeros((6,))
+        new_drdt = np.zeros((6,))
+        _loss = -1.0
 
-        for i in tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}"):
+        for i in (
+            pbar := tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}")
+        ):
+            last_drdt[:3] = new_frame.pose.dR.detach().cpu().numpy()
+            last_drdt[3:] = new_frame.pose.dt.detach().cpu().numpy()
             if self.conf.method == 'igs':
                 outputs = self.splats([new_frame.camera], [new_frame.pose])
                 rendered_rgb = outputs.rgbs[0]
@@ -183,6 +189,8 @@ class Frontend(mp.Process):
                 masked_gt = new_frame.img[keep_mask, ...]
                 loss = F.l1_loss(masked_result, masked_gt)
 
+            _loss = loss.item()
+
             loss += new_frame.pose.dR.norm() * self.conf.dR_regularization
             loss += new_frame.pose.dt.norm() * self.conf.dt_regularization
 
@@ -193,11 +201,17 @@ class Frontend(mp.Process):
             scheduler.step()
             optimizer.zero_grad()
 
-            last_loss = loss.item()
+            new_drdt[:3] = new_frame.pose.dR.detach().cpu().numpy()
+            new_drdt[3:] = new_frame.pose.dt.detach().cpu().numpy()
 
-            self.save_tracking_stats(new_frame, loss.item())
+            if np.linalg.norm(last_drdt - new_drdt) < 1e-5:
+                # we've converged
+                pbar.set_description(
+                    f"[Tracking] frame {len(self.frames)}| loss: {_loss:.3f}"
+                )
+                break
 
-        self.save_tracking_stats(new_frame, last_loss)
+        self.save_tracking_stats(new_frame, _loss)
         self.frames.append(new_frame.strip())
 
         self.add_frame_to_backend(new_frame)
@@ -316,6 +330,35 @@ class Frontend(mp.Process):
 
         return {'ssim': np.mean(ssims), 'psnr': np.mean(psnrs)}
 
+    def log_frame(self, f: Frame) -> None:
+        q, t = f.pose.to_qt()
+        q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
+        t = t.detach().cpu().numpy().reshape(-1)
+        rr.log(
+            "/tracking/pose",
+            rr.Transform3D(
+                rotation=rr.datatypes.Quaternion(xyzw=q),
+                translation=t,
+                from_parent=True,
+            ),
+        )
+        rr.log("/tracking/pose", rr.ViewCoordinates.RDF)  # X=Right, Y=Down, Z=Forward
+
+        rr.log(
+            "/tracking/pose/image",
+            rr.Pinhole(
+                resolution=[f.camera.width, f.camera.height],
+                focal_length=[
+                    f.camera.intrinsics[0, 0].item(),
+                    f.camera.intrinsics[1, 1].item(),
+                ],
+                principal_point=[
+                    f.camera.intrinsics[0, 2].item(),
+                    f.camera.intrinsics[1, 2].item(),
+                ],
+            ),
+        )
+
     @torch.no_grad
     def evaluate_trajectory(self) -> dict:
         fig, ates = evaluate_trajectories(
@@ -326,38 +369,6 @@ class Frontend(mp.Process):
         )
         fig.savefig(self.output_dir / 'traj.png')
         plt.close(fig)
-
-        for i, f in enumerate(self.frames):
-            q, t = f.pose.to_qt()
-            q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
-            t = t.detach().cpu().numpy().reshape(-1)
-            rr.log(
-                f'/tracking/pose_{i}',
-                rr.Transform3D(
-                    rotation=rr.datatypes.Quaternion(xyzw=q),
-                    translation=t,
-                    from_parent=True,
-                ),
-                static=True,
-            )
-            rr.log(
-                f"/tracking/pose_{i}", rr.ViewCoordinates.RDF, static=True
-            )  # X=Right, Y=Down, Z=Forward
-
-            rr.log(
-                f'/tracking/pose_{i}/image',
-                rr.Pinhole(
-                    resolution=[f.camera.width, f.camera.height],
-                    focal_length=[
-                        f.camera.intrinsics[0, 0].item(),
-                        f.camera.intrinsics[1, 1].item(),
-                    ],
-                    principal_point=[
-                        f.camera.intrinsics[0, 2].item(),
-                        f.camera.intrinsics[1, 2].item(),
-                    ],
-                ),
-            )
         return ates
 
     def create_videos(self):
@@ -435,7 +446,7 @@ class Frontend(mp.Process):
                 last_time_we_heard_from_backend = time.time()
 
             if self.waiting_for_end_sync:
-                if (time.time() - last_time_we_heard_from_backend) > 30.0:
+                if (time.time() - last_time_we_heard_from_backend) > 3000.0:
                     print('Looks like backend\'s dead')
                     break
                 continue
