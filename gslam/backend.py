@@ -137,6 +137,7 @@ class Backend(torch.multiprocessing.Process):
             0.1,
             self.conf.initial_opacity,
             self.conf.initial_beta,
+            False,  # TODO parameterize this
         )
         self.insertion_3dgs = InsertUsingImagePlaneGradients(
             0.0002,
@@ -180,10 +181,7 @@ class Backend(torch.multiprocessing.Process):
                 return render_rgbs, render_depths
             case "n_touched":
                 render_rgbs = outputs.n_touched[0, ...].cpu().numpy()
-                print(f'{render_rgbs.shape=}')
                 render_rgbs = np.tile(render_rgbs / render_rgbs.max(), (1, 1, 3))
-                print(f'{render_rgbs.shape=}')
-                print()
                 render_depths = outputs.depthmaps[0, ...].cpu().numpy()
             case x:
                 assert_never(x)

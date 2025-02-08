@@ -268,6 +268,7 @@ class Frontend(mp.Process):
         self.splats, self.keyframes = splats, keyframes
         return
 
+    @torch.no_grad()
     def dump_pointcloud(self):
         rr.log(
             '/tracking/pc',
@@ -291,6 +292,21 @@ class Frontend(mp.Process):
                 .detach()
                 .cpu()
                 .numpy(),
+            ),
+        )
+
+        transparency = torch.sigmoid(self.splats.opacities)
+        radii = self.splats.scales.exp() * transparency.unsqueeze(-1) * 2.0 + 0.004
+        q = self.splats.quats.cpu().numpy()
+        q = np.roll(q, -1, axis=1)
+        rr.log(
+            '/tracking/splats',
+            rr.Ellipsoids3D(
+                half_sizes=radii.cpu().numpy(),
+                centers=self.splats.means.cpu().numpy(),
+                quaternions=q,
+                colors=self.splats.colors.sigmoid().cpu().numpy(),
+                fill_mode=rr.components.FillMode.Solid,
             ),
         )
 

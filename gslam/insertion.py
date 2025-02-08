@@ -105,12 +105,14 @@ class InsertFromDepthMap(InsertionStrategy):
         min_alpha_for_depth: float,
         initial_opacity: float,
         initial_beta: float,
+        insert_in_regions_with_depth: bool = True,
     ):
         self.depth_variance = depth_variance
         self.no_depth_variance = no_depth_variance
         self.min_alpha_for_depth = min_alpha_for_depth
         self.initial_opacity = initial_opacity
         self.initial_beta = initial_beta
+        self.insert_in_regions_with_depth = insert_in_regions_with_depth
 
     @torch.no_grad()
     def step(
@@ -175,7 +177,7 @@ class InsertFromDepthMap(InsertionStrategy):
                     ]
                 ).reshape(-1),
             )
-        if n_valid_depth_splats > 0:
+        if self.insert_in_regions_with_depth and (n_valid_depth_splats > 0):
             picks.append(
                 (
                     pixel_indices_where_depth_is_valid[
@@ -189,6 +191,8 @@ class InsertFromDepthMap(InsertionStrategy):
                 ).reshape(-1),
             )
 
+        if len(picks) == 0:
+            return 0
         picks = torch.cat(picks)
 
         N = picks.shape[0]
