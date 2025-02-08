@@ -490,9 +490,7 @@ class Backend(torch.multiprocessing.Process):
 
         H, W, _ = frame.img.shape
         mock_depth_map = torch.ones((1, H, W), device=self.conf.device)
-        mock_depth_map = (
-            mock_depth_map + (torch.randn_like(mock_depth_map) - 0.5) * 0.05
-        )
+        mock_depth_map = mock_depth_map + (torch.randn_like(mock_depth_map) - 0.5) * 0.3
         mock_depth_map *= self.conf.initial_scale
         mock_alphas = torch.ones((1, H, W, 1), device=self.conf.device)
 
@@ -503,7 +501,7 @@ class Backend(torch.multiprocessing.Process):
             self.splat_optimizers,
             mock_outputs,
             frame,
-            10000,
+            1000,
         )
 
         return
@@ -521,7 +519,7 @@ class Backend(torch.multiprocessing.Process):
             self.splat_optimizers,
             outputs,
             frame,
-            N=500,
+            N=100,
         )
 
         new_frame = Frame(

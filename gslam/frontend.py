@@ -446,8 +446,8 @@ class Frontend(mp.Process):
 
     @rr.shutdown_at_exit
     def run(self):
-        rr.init('gslam', recording_id='gslam_1')
-        rr.save(self.output_dir / 'rr-fe.rrd')
+        rr.init('gslam', recording_id=f'gslam_1_{int(time.time())%10000}', spawn=True)
+        # rr.save(self.output_dir / 'rr-fe.rrd')
         rr.log("/tracking", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
         self.warp = None

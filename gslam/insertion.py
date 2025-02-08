@@ -150,6 +150,10 @@ class InsertFromDepthMap(InsertionStrategy):
             random_depths[~valid_depth_region] * self.no_depth_variance
         )
 
+        # TODO this is kind of arbritary, maybe we should
+        # tie this with the nearplane of the camera
+        depths.clamp_min_(0.1)
+
         pixel_indices_where_depth_is_valid = torch.nonzero(
             valid_depth_region.reshape(-1)
         )
