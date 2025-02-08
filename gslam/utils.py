@@ -127,3 +127,28 @@ def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.
     tv_h = (v_h).pow(2).mean()
     tv_w = (v_w).pow(2).mean()
     return tv_h + tv_w
+
+
+class StopOnPlateau:
+    '''Stop optimization if loss doesn't decrease appreciably for a bit'''
+
+    def __init__(self, patience, min_loss):
+        self.patience = patience
+        self.counter = 0
+        self.min_loss = min_loss
+        self.last_loss = None
+
+    def stop(self, loss):
+        if self.last_loss is None:
+            self.last_loss = loss
+            return False
+        if loss > self.min_loss:
+            return False
+        elif self.last_loss > loss:
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        else:
+            self.counter = 0
+        self.last_loss = loss
+        return False

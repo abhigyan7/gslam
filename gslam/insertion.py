@@ -140,7 +140,10 @@ class InsertFromDepthMap(InsertionStrategy):
             0, min(N - n_invalid_depth_splats, n_valid_depth_pixels)
         )
 
-        median_depth = depths[valid_depth_region].median()
+        if valid_depth_region.any():
+            median_depth = depths[valid_depth_region].median()
+        else:
+            median_depth = depths.median()
 
         random_depths = torch.randn_like(depths, device=device)
 

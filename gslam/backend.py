@@ -29,7 +29,7 @@ from .pruning import (
     prune_using_mask,
 )
 from .rasterization import RasterizationOutput
-from .utils import create_batch, ForkedPdb
+from .utils import create_batch, ForkedPdb, StopOnPlateau
 from .viewer import Viewer
 from .warp import Warp
 
@@ -70,7 +70,7 @@ class MapConfig:
     optim_window_random_keyframes: int = 2
 
     num_iters_mapping: int = 15
-    num_iters_initialization: int = 500
+    num_iters_initialization: int = 1000
 
     opacity_pruning_threshold: float = 0.5
     size_pruning_threshold: int = 256
@@ -218,6 +218,8 @@ class Backend(torch.multiprocessing.Process):
         radii = None
         n_touched = None
 
+        early_stopper = StopOnPlateau(10, 0.05)
+
         for step in (pbar := tqdm.trange(n_iters)):
             self.total_step += 1
             window = self.optimization_window()
@@ -305,13 +307,19 @@ class Backend(torch.multiprocessing.Process):
                 prune = False
 
             desc = (
-                f"[Mapping] keyframe {len(self.keyframes)} loss={photometric_loss.item():.3f}, "
+                f"[Mapping] keyframe {len(self.keyframes)} pm={photometric_loss.item():.4f}, "
+                f"loss={total_loss.item():.5f}, "
                 f"n_splats={self.splats.means.shape[0]:07}, "
                 f"mean_beta={self.splats.betas.exp().mean().item():.3f}"
             )
             pbar.set_description(desc)
 
             self.step_all_optimizers()
+
+            if early_stopper.stop(total_loss.item()):
+                print('Pausing map optimization')
+                self.pause_map_optim = True
+                break
 
         gaussians_max_screen_size = torch.max(outputs.radii, axis=0).values
 
@@ -356,11 +364,12 @@ class Backend(torch.multiprocessing.Process):
         )
 
         last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
-        with torch.no_grad():
-            self.splats.opacities.data[outputs.n_touched.sum(dim=0) > 0] = (
-                self.splats.opacities.data[outputs.n_touched.sum(dim=0) > 0]
-                * self.conf.opacity_decay
-            )
+        if len(self.keyframes) > 1:
+            with torch.no_grad():
+                self.splats.opacities.data[outputs.n_touched.sum(dim=0) > 0] = (
+                    self.splats.opacities.data[outputs.n_touched.sum(dim=0) > 0]
+                    * self.conf.opacity_decay
+                )
 
         self.last_kf_depthmap = outputs.depthmaps[0]
         self.last_kf_rgbs = outputs.rgbs[0]
@@ -490,7 +499,7 @@ class Backend(torch.multiprocessing.Process):
         mock_depth_map = torch.ones((1, H, W), device=self.conf.device)
         mock_depth_map = mock_depth_map + (torch.randn_like(mock_depth_map) - 0.5) * 0.3
         mock_depth_map *= self.conf.initial_scale
-        mock_alphas = torch.ones((1, H, W, 1), device=self.conf.device)
+        mock_alphas = torch.ones((1, H, W, 1), device=self.conf.device) * 0.01
 
         mock_outputs = RasterizationOutput(None, mock_alphas, mock_depth_map)
 
@@ -499,7 +508,7 @@ class Backend(torch.multiprocessing.Process):
             self.splat_optimizers,
             mock_outputs,
             frame,
-            1000,
+            5000,
         )
 
         return
@@ -592,6 +601,11 @@ class Backend(torch.multiprocessing.Process):
             render_depth=True,
         )
 
+        photometric_error = (outputs.rgbs[0] - new_frame.img).square().mean()
+        # TODO parameterize this
+        if photometric_error.item() > 0.15:
+            return True
+
         new_frame.visible_gaussians = outputs.radii[0] > 0
         previous_keyframe.visible_gaussians = outputs.radii[1] > 0
 
@@ -614,6 +628,7 @@ class Backend(torch.multiprocessing.Process):
 
     def run(self):
         self.warp = None
+        self.pause_map_optim = False
 
         if self.enable_viser_server:
             self.server = viser.ViserServer(verbose=False)
@@ -625,11 +640,11 @@ class Backend(torch.multiprocessing.Process):
 
         while True:
             if self.queue.empty():
-                if len(self.keyframes) > 0:
-                    with self.splats_mutex:
-                        self.optimize_map()
-                time.sleep(0.03)
-                continue
+                if self.pause_map_optim or len(self.keyframes) == 0:
+                    time.sleep(0.03)
+                    continue
+                with self.splats_mutex:
+                    self.optimize_map()
             match self.queue.get():
                 case [FrontendMessage.ADD_REFINED_DEPTHMAP, _depth, _frame_idx]:
                     raise NotImplementedError()
@@ -645,6 +660,7 @@ class Backend(torch.multiprocessing.Process):
                         continue
                     last_keyframe = self.keyframes[sorted(self.keyframes.keys())[-1]]
                     if self.to_insert_keyframe(last_keyframe, frame):
+                        self.pause_map_optim = False
                         with self.splats_mutex:
                             self.add_keyframe(frame)
                         self.sync()
@@ -654,6 +670,7 @@ class Backend(torch.multiprocessing.Process):
                     if frame.index % 5 == 0:
                         self.sync()
                 case [FrontendMessage.REQUEST_INIT, frame]:
+                    self.pause_map_optim = False
                     self.initialize(frame)
                     with self.splats_mutex:
                         self.optimize_map(self.conf.num_iters_initialization)

@@ -222,7 +222,7 @@ class Frontend(mp.Process):
                 self.output_dir / f"renders/{i:08}.jpg"
             )
         else:
-            torch_to_pil(rendered_rgb).save(self.output_dir / f"renders/{i:08}.jpg")
+            torch_to_pil(outputs.rgbs[0]).save(self.output_dir / f"renders/{i:08}.jpg")
         return new_frame.pose()
 
     def add_frame_to_backend(self, new_frame: Frame):
@@ -377,7 +377,6 @@ class Frontend(mp.Process):
                 from_parent=True,
             ),
         )
-        # rr.log("/tracking/pose", rr.ViewCoordinates.RDF)  # X=Right, Y=Down, Z=Forward
 
         rr.log(
             f"{name}/image",

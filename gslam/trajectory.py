@@ -67,6 +67,8 @@ def evaluate_trajectories(
 
     for traj_name, ax in zip(trajectories, axes):
         gt_Rts = np.array([f.gt_pose.cpu().numpy() for f in trajectories[traj_name]])
+        if len(gt_Rts) < 2:
+            continue
         estimated_Rts = np.array(
             [f.pose().cpu().numpy() for f in trajectories[traj_name]]
         )
