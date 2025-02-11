@@ -60,7 +60,7 @@ class MapConfig:
     background_color: tuple = (0.0, 0.0, 0.0)
 
     initial_number_of_gaussians: int = 10_000
-    initial_opacity: float = 0.9
+    initial_opacity: float = 0.5
     initial_scale: float = 1.0
     initial_beta: float = 0.3
 
@@ -133,7 +133,7 @@ class Backend(torch.multiprocessing.Process):
         self.pruning_size = PruneLargeGaussians(self.conf.size_pruning_threshold)
         self.insertion_depth_map = InsertFromDepthMap(
             0.1 * self.conf.initial_scale,
-            0.25 * self.conf.initial_scale,
+            0.2 * self.conf.initial_scale,
             0.1,
             self.conf.initial_opacity,
             self.conf.initial_beta,
@@ -327,12 +327,7 @@ class Backend(torch.multiprocessing.Process):
             (self.splats.means.shape[0]), dtype=torch.bool, device=self.conf.device
         )
 
-        if (
-            self.conf.enable_visibility_pruning
-            and prune
-            and (len(window) >= self.conf.optim_window_last_n_keyframes)
-            and (self.total_step % 200 == 0)
-        ):
+        if self.conf.enable_visibility_pruning and prune and (len(window) >= 2):
             radii = outputs.radii[: self.conf.optim_window_last_n_keyframes]
             n_touched = outputs.n_touched[: self.conf.optim_window_last_n_keyframes]
             remove_mask = remove_mask | self.pruning_conditioning.step(
@@ -366,8 +361,8 @@ class Backend(torch.multiprocessing.Process):
         last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
         if len(self.keyframes) > 1:
             with torch.no_grad():
-                self.splats.opacities.data[outputs.n_touched.sum(dim=0) > 0] = (
-                    self.splats.opacities.data[outputs.n_touched.sum(dim=0) > 0]
+                self.splats.opacities.data[outputs.n_touched.sum(dim=0) > 1] = (
+                    self.splats.opacities.data[outputs.n_touched.sum(dim=0) > 1]
                     * self.conf.opacity_decay
                 )
 
@@ -456,6 +451,7 @@ class Backend(torch.multiprocessing.Process):
         for optimizer in self.splat_optimizers.values():
             optimizer.step()
         self.pose_optimizer.step()
+        [kf.pose.normalize() for kf in self.keyframes.values()]
 
     def initialize_optimizers(self):
         # TODO fix these LRs
@@ -550,7 +546,7 @@ class Backend(torch.multiprocessing.Process):
         # )
         self.pose_optimizer.add_param_group(
             {
-                'params': new_frame.pose.se3,
+                'params': new_frame.pose.parameters(),
                 'lr': self.conf.pose_optim_lr_rotation,
             }
         )
