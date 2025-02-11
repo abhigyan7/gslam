@@ -1,11 +1,12 @@
 from dataclasses import dataclass
+from threading import Event
 
+import pypose as pp
 import torch
 from torch.nn import functional as F
 
 from .utils import unvmap
 
-from threading import Event
 
 identity_6d = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
 
@@ -85,6 +86,48 @@ class PoseZhou(torch.nn.Module):
 
 
 class Pose(torch.nn.Module):
+    def __init__(
+        self, initial_pose: torch.Tensor = None, se3=None, is_learnable: bool = True
+    ):
+        super().__init__()
+
+        self.is_learnable = is_learnable
+        # if initial_pose is None:
+        #     Rt = pp.identity_SE3()
+        # else:
+        #     Rt = pp.mat2SE3(initial_pose[None])
+        # self.register_buffer('Rt', Rt)
+        Rt = initial_pose
+        if initial_pose is None:
+            Rt = torch.nn.Buffer(torch.eye(4))
+        self.Rt = torch.nn.Buffer(Rt)
+        if se3 is None:
+            self.se3 = pp.Parameter(pp.identity_se3(requires_grad=is_learnable))
+        else:
+            self.se3 = pp.Parameter(pp.se3(se3))
+
+    def forward(self) -> torch.Tensor:
+        if not self.is_learnable:
+            return self.Rt
+        dRt = self.se3.Exp().matrix()
+        return self.Rt @ dRt
+
+    def __deepcopy__(self, memo):
+        '''Doing this because Rt isn't cloned properly'''
+        return Pose(
+            self.Rt.clone(),
+            self.se3.clone(),
+            is_learnable=self.is_learnable,
+        )
+
+    def to_qt(self):
+        pose = self()
+        R = pose[:3, :3]
+        t = pose[:3, 3]
+        return unvmap(matrix_to_quaternion)(R), t
+
+
+class PoseSO3xR3(torch.nn.Module):
     def __init__(self, _pose: torch.Tensor = None, is_learnable: bool = True):
         super().__init__()
 
