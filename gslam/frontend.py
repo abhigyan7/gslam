@@ -43,8 +43,7 @@ class TrackingConfig:
     device: str = 'cuda'
     num_tracking_iters: int = 150
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'l1'
-    pose_optim_lr_translation: float = 0.001
-    pose_optim_lr_rotation: float = 0.003
+    pose_optim_lr: float = 0.002
 
     method: Literal['igs', 'warp'] = 'igs'
 
@@ -142,16 +141,11 @@ class Frontend(mp.Process):
             optimizer = torch.optim.Adam(
                 [
                     {
-                        'params': [new_frame.pose.dR],
-                        'lr': self.conf.pose_optim_lr_rotation,
-                    },
-                    {
-                        'params': [new_frame.pose.dt],
-                        'lr': self.conf.pose_optim_lr_translation,
-                    },
+                        'params': [new_frame.pose.se3],
+                        'lr': self.conf.pose_optim_lr,
+                    }
                 ]
             )
-
             if self.conf.method == 'warp':
                 optimizer.add_param_group(
                     {
@@ -162,15 +156,12 @@ class Frontend(mp.Process):
             scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.99)
             n_iters = self.conf.num_tracking_iters
 
-        last_drdt = np.zeros((6,))
-        new_drdt = np.zeros((6,))
         _loss = 0.0
 
         for i in (
             pbar := tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}")
         ):
-            last_drdt[:3] = new_frame.pose.dR.detach().cpu().numpy()
-            last_drdt[3:] = new_frame.pose.dt.detach().cpu().numpy()
+            last_drdt = new_frame.pose.se3.detach().cpu().numpy()
             if self.conf.method == 'igs':
                 outputs = self.splats([new_frame.camera], [new_frame.pose])
                 rendered_rgb = outputs.rgbs[0]
@@ -191,8 +182,9 @@ class Frontend(mp.Process):
 
             _loss = loss.item()
 
-            loss += new_frame.pose.dR.norm() * self.conf.dR_regularization
-            loss += new_frame.pose.dt.norm() * self.conf.dt_regularization
+            # TODO add regularization back
+            # loss += new_frame.pose.dR.norm() * self.conf.dR_regularization
+            # loss += new_frame.pose.dt.norm() * self.conf.dt_regularization
 
             loss += total_variation_loss(self.reference_ddepthmap) * 30.0
             pbar.set_description(
@@ -204,10 +196,9 @@ class Frontend(mp.Process):
             scheduler.step()
             optimizer.zero_grad()
 
-            new_drdt[:3] = new_frame.pose.dR.detach().cpu().numpy()
-            new_drdt[3:] = new_frame.pose.dt.detach().cpu().numpy()
+            new_drdt = new_frame.pose.se3.detach().cpu().numpy()
 
-            if np.linalg.norm(last_drdt - new_drdt) < 1e-5:
+            if np.linalg.norm(last_drdt - new_drdt) < 1e-3:
                 break
 
         self.log_frame(new_frame)
@@ -237,7 +228,7 @@ class Frontend(mp.Process):
         splats: GaussianSplattingData,
         pose_graph: dict[int, set],
     ):
-        self.keyframes = keyframes
+        self.keyframes = deepcopy(keyframes)
         self.reference_depthmap = depthmap.clone()
         self.reference_ddepthmap = torch.zeros_like(depthmap).requires_grad_(True)
         self.reference_frame = keyframes[sorted(keyframes.keys())[-1]]

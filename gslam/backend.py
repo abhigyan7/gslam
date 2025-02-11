@@ -542,15 +542,15 @@ class Backend(torch.multiprocessing.Process):
         )
 
         self.keyframes[new_frame.index] = new_frame
+        # self.pose_optimizer.add_param_group(
+        #     {
+        #         'params': new_frame.pose.dt,
+        #         'lr': self.conf.pose_optim_lr_translation,
+        #     }
+        # )
         self.pose_optimizer.add_param_group(
             {
-                'params': new_frame.pose.dt,
-                'lr': self.conf.pose_optim_lr_translation,
-            }
-        )
-        self.pose_optimizer.add_param_group(
-            {
-                'params': new_frame.pose.dR,
+                'params': new_frame.pose.se3,
                 'lr': self.conf.pose_optim_lr_rotation,
             }
         )
@@ -603,6 +603,7 @@ class Backend(torch.multiprocessing.Process):
 
         photometric_error = (outputs.rgbs[0] - new_frame.img).square().mean()
         # TODO parameterize this
+        # TODO this isn't kicking in
         if photometric_error.item() > 0.15:
             return True
 
@@ -649,6 +650,7 @@ class Backend(torch.multiprocessing.Process):
                 case [FrontendMessage.ADD_REFINED_DEPTHMAP, _depth, _frame_idx]:
                     raise NotImplementedError()
                 case [FrontendMessage.ADD_FRAME, frame]:
+                    frame = deepcopy(frame)
                     if self.warp is None:
                         self.warp = Warp(
                             frame.camera.intrinsics,
@@ -670,6 +672,7 @@ class Backend(torch.multiprocessing.Process):
                     if frame.index % 5 == 0:
                         self.sync()
                 case [FrontendMessage.REQUEST_INIT, frame]:
+                    frame = deepcopy(frame)
                     self.pause_map_optim = False
                     self.initialize(frame)
                     with self.splats_mutex:

@@ -24,9 +24,9 @@ class PipelineConfig:
 def main(conf: PipelineConfig):
     tum_dataset = TumRGB(conf.scene, conf.seq_len)
 
-    dataset_queue = mp.JoinableQueue()
-    frontend_to_backend_queue = mp.JoinableQueue()
-    backend_to_frontend_queue = mp.JoinableQueue()
+    dataset_queue = mp.Queue()
+    frontend_to_backend_queue = mp.Queue()
+    backend_to_frontend_queue = mp.Queue()
 
     frontend_done_event = mp.Event()
     backend_done_event = mp.Event()

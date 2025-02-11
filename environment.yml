@@ -41,4 +41,5 @@ dependencies:
     - pytest
     - pre-commit
     - nerfview
+    - pytransform3d
 
