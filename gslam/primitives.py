@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import dataclass
 from threading import Event
 
@@ -85,6 +86,37 @@ class PoseZhou(torch.nn.Module):
         return unvmap(matrix_to_quaternion)(R), t
 
 
+class _Pose(torch.nn.Module):
+    def __init__(self, initial_pose: torch.Tensor = None, is_learnable: bool = True):
+        super().__init__()
+
+        self.is_learnable = is_learnable
+        Rt = initial_pose
+        if initial_pose is None:
+            Rt = torch.eye(4)
+        self.Rt = pp.Parameter(pp.mat2SE3(Rt[:3, :]))
+
+    def forward(self) -> torch.Tensor:
+        return self.Rt.matrix()
+
+    def __deepcopy__(self, memo):
+        '''Doing this because Rt isn't cloned properly'''
+        return type(self)(
+            pp.SE3(self.Rt).matrix().clone().detach(),
+            is_learnable=self.is_learnable,
+        )
+
+    def to_qt(self):
+        pose = self()
+        R = pose[:3, :3]
+        t = pose[:3, 3]
+        return unvmap(matrix_to_quaternion)(R), t
+
+    @torch.no_grad()
+    def normalize(self):
+        pp.quat2unit(self.Rt)
+
+
 class Pose(torch.nn.Module):
     def __init__(
         self, initial_pose: torch.Tensor = None, se3=None, is_learnable: bool = True
@@ -114,7 +146,7 @@ class Pose(torch.nn.Module):
 
     def __deepcopy__(self, memo):
         '''Doing this because Rt isn't cloned properly'''
-        return Pose(
+        return type(self)(
             self.Rt.clone(),
             self.se3.clone(),
             is_learnable=self.is_learnable,
@@ -126,8 +158,12 @@ class Pose(torch.nn.Module):
         t = pose[:3, 3]
         return unvmap(matrix_to_quaternion)(R), t
 
+    @torch.no_grad()
+    def normalize(self):
+        return
 
-class PoseSO3xR3(torch.nn.Module):
+
+class Pose_se3(torch.nn.Module):
     def __init__(self, _pose: torch.Tensor = None, is_learnable: bool = True):
         super().__init__()
 
@@ -358,7 +394,7 @@ class Frame:
             None,
             self.timestamp,
             self.camera,
-            Pose(self.pose()),
+            deepcopy(self.pose),
             self.gt_pose,
             self.index,
             None,

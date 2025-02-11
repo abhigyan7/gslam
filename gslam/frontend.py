@@ -47,8 +47,7 @@ class TrackingConfig:
 
     method: Literal['igs', 'warp'] = 'igs'
 
-    dt_regularization: float = 0.01
-    dR_regularization: float = 0.001
+    pose_regularization: float = 0.01
 
 
 class Frontend(mp.Process):
@@ -141,7 +140,7 @@ class Frontend(mp.Process):
             optimizer = torch.optim.Adam(
                 [
                     {
-                        'params': [new_frame.pose.se3],
+                        'params': new_frame.pose.parameters(),
                         'lr': self.conf.pose_optim_lr,
                     }
                 ]
@@ -182,23 +181,22 @@ class Frontend(mp.Process):
 
             _loss = loss.item()
 
-            # TODO add regularization back
-            # loss += new_frame.pose.dR.norm() * self.conf.dR_regularization
-            # loss += new_frame.pose.dt.norm() * self.conf.dt_regularization
+            loss += new_frame.pose.se3.norm() * self.conf.pose_regularization
 
             loss += total_variation_loss(self.reference_ddepthmap) * 30.0
             pbar.set_description(
-                f"[Tracking] frame {len(self.frames)}| loss: {_loss:.3f}"
+                f"[Tracking] frame {len(self.frames)}| loss: {_loss:.8f}"
             )
 
             loss.backward()
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
+            new_frame.pose.normalize()
 
             new_drdt = new_frame.pose.se3.detach().cpu().numpy()
 
-            if np.linalg.norm(last_drdt - new_drdt) < 1e-3:
+            if np.linalg.norm(last_drdt - new_drdt) < 1e-5:
                 break
 
         self.log_frame(new_frame)
@@ -256,7 +254,7 @@ class Frontend(mp.Process):
         return
 
     def sync_at_end(self, splats: GaussianSplattingData, keyframes: dict[int, Frame]):
-        self.splats, self.keyframes = splats, keyframes
+        self.splats, self.keyframes = splats, deepcopy(keyframes)
         return
 
     @torch.no_grad()
@@ -296,7 +294,19 @@ class Frontend(mp.Process):
                 half_sizes=radii.cpu().numpy(),
                 centers=self.splats.means.cpu().numpy(),
                 quaternions=q,
-                colors=self.splats.colors.sigmoid().cpu().numpy(),
+                # colors=self.splats.colors.sigmoid().cpu().numpy(),
+                colors=torch.sigmoid(
+                    torch.cat(
+                        [
+                            self.splats.colors,
+                            self.splats.opacities[..., None],
+                        ],
+                        dim=1,
+                    )
+                )
+                .detach()
+                .cpu()
+                .numpy(),
                 fill_mode=rr.components.FillMode.Solid,
             ),
         )
