@@ -17,22 +17,16 @@ import tqdm
 
 import matplotlib.pyplot as plt
 import numpy as np
-from pyquaternion import Quaternion
 from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from PIL import Image
 
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
-from .primitives import Frame, Pose
+from .primitives import Frame, Pose, matrix_to_quaternion
 from .rasterization import RasterizationOutput
 from .trajectory import evaluate_trajectories
-from .utils import (
-    torch_image_to_np,
-    torch_to_pil,
-    false_colormap,
-    ForkedPdb,
-)
+from .utils import torch_image_to_np, torch_to_pil, false_colormap, ForkedPdb, unvmap
 from .warp import Warp
 
 
@@ -410,10 +404,10 @@ class Frontend(mp.Process):
     @torch.no_grad
     def save_trajectories(self) -> dict:
         def format_pose(pose: torch.Tensor, timestamp: float):
+            q = unvmap(matrix_to_quaternion)(pose[:3, :3])
+            q = q.detach().cpu().numpy().tolist()
             Rt = pose.detach().cpu().numpy()
-            q = Quaternion(matrix=Rt[:3, :3], rtol=1e-3, atol=1e-5)
             t = Rt[:3, 3]
-            q = q.unit.elements.tolist()
             values = [timestamp, *(t.tolist()), q[1], q[2], q[3], q[0]]
             return ' '.join(map(str, values)) + '\n'
 
@@ -465,8 +459,8 @@ class Frontend(mp.Process):
 
             false_colormap(
                 outputs.depthmaps[0],
-                near=0.0,
-                far=min(1.5, outputs.depthmaps[0].max().item()),
+                near=0.2,
+                far=min(2.5, outputs.depthmaps[0].max().item()),
             ).save(self.output_dir / f'depths/{i:08}.jpg')
 
             torch_to_pil(outputs.rgbs[0]).save(self.output_dir / f"renders/{i:08}.jpg")
@@ -546,6 +540,7 @@ class Frontend(mp.Process):
                     with open(self.output_dir / 'metrics.json', 'a') as f:
                         json.dump(metrics, f)
                         f.write('\n')
+                    self.save_trajectories()
 
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')
