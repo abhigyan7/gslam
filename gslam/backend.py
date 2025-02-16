@@ -94,7 +94,7 @@ class MapConfig:
     pgo_loss_weight: float = 0.1
 
     kf_cov = 0.9
-    kf_oc = 0.4
+    kf_oc = 0.3
     kf_m = 0.3
 
 
@@ -358,7 +358,8 @@ class Backend(torch.multiprocessing.Process):
             True,
         )
 
-        last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
+        # last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
+        last_kf.visible_gaussians = outputs.radii.sum(dim=0) > 0
 
         self.last_kf_depthmap = outputs.depthmaps[0]
         self.last_kf_rgbs = outputs.rgbs[0]
@@ -562,6 +563,21 @@ class Backend(torch.multiprocessing.Process):
         iou = intersection.sum() / union.sum()
         return iou.item() > self.conf.kf_cov
 
+    def to_remove_keyframe(
+        self,
+        kf_i: Frame,
+        kf_j: Frame,
+    ):
+        intersection = torch.logical_and(kf_j.visible_gaussians, kf_i.visible_gaussians)
+        oc = intersection.sum() / (
+            min(
+                kf_i.visible_gaussians.sum().item(), kf_j.visible_gaussians.sum().item()
+            )
+        )
+        print(f'Redundancy check: {kf_i.index} {kf_j.index} {oc}')
+        return oc < self.conf.kf_oc
+
+    @torch.no_grad()
     def add_pgo_constraints(
         self,
     ):
@@ -571,12 +587,26 @@ class Backend(torch.multiprocessing.Process):
                 [kf.pose],
             )
 
-            kf.visible_gaussians = outputs.n_touched.sum(dim=0) > 0
+            kf.visible_gaussians = outputs.radii.sum(dim=0) > 0
 
         for i, j in combinations(sorted(self.keyframes), 2):
+            if i not in self.keyframes:
+                continue
+            if j not in self.keyframes:
+                continue
+
+            kf_i = self.keyframes[i]
+            kf_j = self.keyframes[j]
+
+            # if self.to_remove_keyframe(kf_i, kf_j):
+            #     print(f'removing kf {i}')
+            #     self.keyframes.pop(i, None)
+            #     remove_keyframe(self.pose_graph, i)
+            #     continue
+
             if j in self.pose_graph[i]:
                 continue
-            if self.to_add_pg_edge(self.keyframes[i], self.keyframes[j]):
+            if self.to_add_pg_edge(kf_i, kf_j):
                 print(f'Found loop closure! {i, j}')
                 add_constraint(self.pose_graph, i, j)
 
