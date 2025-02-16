@@ -17,6 +17,7 @@ import tqdm
 
 import matplotlib.pyplot as plt
 import numpy as np
+from pyquaternion import Quaternion
 from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from PIL import Image
@@ -24,13 +25,13 @@ from PIL import Image
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, Pose
+from .rasterization import RasterizationOutput
 from .trajectory import evaluate_trajectories
 from .utils import (
     torch_image_to_np,
     torch_to_pil,
     false_colormap,
     ForkedPdb,
-    total_variation_loss,
 )
 from .warp import Warp
 
@@ -42,7 +43,7 @@ fpdb = ForkedPdb()
 class TrackingConfig:
     device: str = 'cuda'
     num_tracking_iters: int = 150
-    photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'l1'
+    photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'active-nerf'
     pose_optim_lr: float = 0.002
 
     method: Literal['igs', 'warp'] = 'igs'
@@ -89,7 +90,6 @@ class Frontend(mp.Process):
         os.makedirs(self.output_dir / 'renders', exist_ok=True)
         os.makedirs(self.output_dir / 'alphas', exist_ok=True)
         os.makedirs(self.output_dir / 'depths', exist_ok=True)
-        os.makedirs(self.output_dir / 'ddepths', exist_ok=True)
         os.makedirs(self.output_dir / 'betas', exist_ok=True)
         os.makedirs(self.output_dir / 'final_renders', exist_ok=True)
         os.makedirs(self.output_dir / 'final_depths', exist_ok=True)
@@ -107,7 +107,7 @@ class Frontend(mp.Process):
             case 'mse':
                 return error.square().mean()
             case 'active-nerf':
-                return (error * betas.pow(-1.0).unsqueeze(-1)).square().mean()
+                return (error.square().sum(dim=-1) * betas.pow(-2.0)).mean()
             case _:
                 assert_never(self.conf.photometric_loss)
 
@@ -117,9 +117,6 @@ class Frontend(mp.Process):
         self.keyframes[new_frame.index] = new_frame
         self.reference_frame = new_frame
         self.reference_depthmap = torch.ones_like(new_frame.gt_depth)
-        self.reference_ddepthmap = torch.zeros_like(
-            new_frame.gt_depth, requires_grad=True
-        )
         self.reference_rgbs = new_frame.img
 
         if self.conf.method == 'igs':
@@ -134,7 +131,7 @@ class Frontend(mp.Process):
         if len(self.frames) == 0:
             self.initialize(new_frame)
             n_iters = 0
-        else:
+        elif len(self.frames) == 1:
             pose = self.frames[-1].pose()
             new_frame.pose = Pose(pose.detach()).to(self.conf.device)
             optimizer = torch.optim.Adam(
@@ -145,24 +142,37 @@ class Frontend(mp.Process):
                     }
                 ]
             )
-            if self.conf.method == 'warp':
-                optimizer.add_param_group(
-                    {
-                        'params': [self.reference_ddepthmap],
-                    },
-                )
 
-            scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.99)
+            # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.99)
+            n_iters = self.conf.num_tracking_iters
+        else:
+            # constant motion model
+            pose_a = self.frames[-2].pose()
+            pose_b = self.frames[-1].pose()
+            pose_c = pose_b @ torch.linalg.inv(pose_a) @ pose_b
+            new_frame.pose = Pose(pose_c.detach()).to(self.conf.device)
+            optimizer = torch.optim.Adam(
+                [
+                    {
+                        'params': new_frame.pose.se3,
+                        'lr': self.conf.pose_optim_lr,
+                    }
+                ]
+            )
+
+            # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 1.0)
             n_iters = self.conf.num_tracking_iters
 
         _loss = 0.0
+        outputs = None
 
         for i in (
             pbar := tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}")
         ):
-            last_drdt = new_frame.pose.se3.detach().cpu().numpy()
             if self.conf.method == 'igs':
-                outputs = self.splats([new_frame.camera], [new_frame.pose])
+                outputs = self.splats(
+                    [new_frame.camera], [new_frame.pose], render_depth=True
+                )
                 rendered_rgb = outputs.rgbs[0]
                 betas = outputs.betas[0]
                 loss = self.tracking_loss(rendered_rgb, new_frame.img, betas)
@@ -172,7 +182,7 @@ class Frontend(mp.Process):
                     new_frame.pose(),
                     self.reference_frame.img,
                     # self.reference_rgbs,
-                    self.reference_depthmap + self.reference_ddepthmap,
+                    self.reference_depthmap,
                     # self.reference_depthmap,
                 )
                 masked_result = rendered_rgb[keep_mask, ...]
@@ -183,35 +193,26 @@ class Frontend(mp.Process):
 
             loss += new_frame.pose.se3.norm() * self.conf.pose_regularization
 
-            loss += total_variation_loss(self.reference_ddepthmap) * 30.0
-            pbar.set_description(
-                f"[Tracking] frame {len(self.frames)}| loss: {_loss:.8f}"
-            )
-
             loss.backward()
             optimizer.step()
-            scheduler.step()
+            # scheduler.step()
             optimizer.zero_grad()
+
+            drdt = new_frame.pose.se3.detach().cpu().numpy()
+            pbar.set_description(
+                f"[Tracking] frame {len(self.frames)}| loss: {_loss:.8f}| {np.linalg.norm(drdt)}"
+            )
             new_frame.pose.normalize()
 
-            new_drdt = new_frame.pose.se3.detach().cpu().numpy()
-
-            if np.linalg.norm(last_drdt - new_drdt) < 1e-5:
+            if np.linalg.norm(drdt) < 5e-5:
                 break
 
         self.log_frame(new_frame)
-        self.save_tracking_stats(new_frame, _loss)
+        self.save_tracking_stats(new_frame, _loss, outputs)
         self.frames.append(new_frame.strip())
 
         self.add_frame_to_backend(new_frame)
 
-        i = len(self.frames)
-        if n_iters == 0:
-            torch_to_pil(self.reference_frame.img).save(
-                self.output_dir / f"renders/{i:08}.jpg"
-            )
-        else:
-            torch_to_pil(outputs.rgbs[0]).save(self.output_dir / f"renders/{i:08}.jpg")
         return new_frame.pose()
 
     def add_frame_to_backend(self, new_frame: Frame):
@@ -228,7 +229,6 @@ class Frontend(mp.Process):
     ):
         self.keyframes = deepcopy(keyframes)
         self.reference_depthmap = depthmap.clone()
-        self.reference_ddepthmap = torch.zeros_like(depthmap).requires_grad_(True)
         self.reference_frame = keyframes[sorted(keyframes.keys())[-1]]
         self.reference_rgbs = rgbs
         self.splats = splats
@@ -343,7 +343,7 @@ class Frontend(mp.Process):
             )
             false_colormap(
                 outputs.depthmaps[0],
-                near=0.5,
+                near=0.0,
                 far=2.0,
             ).save(self.output_dir / f'final_depths/{i:08}.jpg')
 
@@ -400,52 +400,76 @@ class Frontend(mp.Process):
             {
                 'keyframes': self.keyframes.values(),
                 'tracking': self.frames,
-            }
+            },
+            keyframe_indices=sorted(self.keyframes.keys()),
         )
         fig.savefig(self.output_dir / 'traj.png')
         plt.close(fig)
         return ates
 
+    @torch.no_grad
+    def save_trajectories(self) -> dict:
+        def format_pose(pose: torch.Tensor, timestamp: float):
+            Rt = pose.detach().cpu().numpy()
+            q = Quaternion(matrix=Rt[:3, :3], rtol=1e-3, atol=1e-5)
+            t = Rt[:3, 3]
+            q = q.unit.elements.tolist()
+            values = [timestamp, *(t.tolist()), q[1], q[2], q[3], q[0]]
+            return ' '.join(map(str, values)) + '\n'
+
+        with (
+            open(self.output_dir / 'gt_traj_frames.txt', 'w') as gt_traj_file,
+            open(self.output_dir / 'gslam_traj_frames.txt', 'w') as gslam_traj_file,
+        ):
+            for f in self.frames:
+                gslam_traj_file.write(format_pose(f.pose(), f.timestamp))
+                gt_traj_file.write(format_pose(f.gt_pose, f.timestamp))
+
+        with (
+            open(self.output_dir / 'gt_traj_keyframes.txt', 'w') as gt_traj_file,
+            open(self.output_dir / 'gslam_traj_keyframes.txt', 'w') as gslam_traj_file,
+        ):
+            for kf_index in sorted(self.keyframes.keys()):
+                f = self.keyframes[kf_index]
+                gslam_traj_file.write(format_pose(f.pose(), f.timestamp))
+                gt_traj_file.write(format_pose(f.gt_pose, f.timestamp))
+
     def create_videos(self):
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir / "final.mp4"}'
         )
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/gt/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"gt.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/gt/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir / "gt.mp4"}'
         )
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/renders/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"renders.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/renders/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir / "renders.mp4"}'
         )
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_renders/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final_renders.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_renders/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir / "final_renders.mp4"}'
         )
         os.system(
-            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_depths/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir/"final_depths.mp4"}'
+            f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_depths/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir / "final_depths.mp4"}'
         )
 
-    def save_tracking_stats(self, new_frame, loss):
-        depth = self.reference_depthmap + self.reference_ddepthmap
+    def save_tracking_stats(self, new_frame, loss, outputs: RasterizationOutput = None):
+        i = new_frame.index
 
-        rr.log(
-            '/tracking/loss',
-            rr.Scalar(loss),
-        )
+        rr.log('/tracking/loss', rr.Scalar(loss))
 
-        torch_to_pil(new_frame.img).save(
-            self.output_dir / f'gt/{len(self.frames):08}.jpg'
-        )
+        torch_to_pil(new_frame.img).save(self.output_dir / f'gt/{i:08}.jpg')
 
-        false_colormap(depth).save(
-            self.output_dir / f'depths/{len(self.frames):08}.jpg'
-        )
+        if outputs is not None:
+            false_colormap(outputs.betas[0], near=0.0, far=2.0).save(
+                self.output_dir / f'betas/{i:08}.jpg'
+            )
 
-        ddepth = self.reference_ddepthmap.clone()
-        ddepth = (ddepth - ddepth.min()) / (ddepth.max() - ddepth.min() + 1e-10)
-        ddepth[self.reference_ddepthmap.abs() < 0.01] = 0
+            false_colormap(
+                outputs.depthmaps[0],
+                near=0.0,
+                far=min(1.5, outputs.depthmaps[0].max().item()),
+            ).save(self.output_dir / f'depths/{i:08}.jpg')
 
-        false_colormap(ddepth).save(
-            self.output_dir / f'ddepths/{len(self.frames):08}.jpg'
-        )
+            torch_to_pil(outputs.rgbs[0]).save(self.output_dir / f"renders/{i:08}.jpg")
 
     def handle_message_from_backend(self, message):
         match message:
@@ -462,7 +486,7 @@ class Frontend(mp.Process):
 
     @rr.shutdown_at_exit
     def run(self):
-        rr.init('gslam', recording_id=f'gslam_1_{int(time.time())%10000}', spawn=True)
+        rr.init('gslam', recording_id=f'gslam_1_{int(time.time()) % 10000}', spawn=True)
         # rr.save(self.output_dir / 'rr-fe.rrd')
         rr.log("/tracking", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
@@ -529,6 +553,7 @@ class Frontend(mp.Process):
         metrics = dict()
         metrics.update(self.evaluate_reconstruction())
         metrics.update(self.evaluate_trajectory())
+        self.save_trajectories()
         self.create_videos()
 
         metrics['N'] = self.splats.means.shape[0]
