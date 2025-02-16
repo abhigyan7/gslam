@@ -38,9 +38,8 @@ forked_pdb = ForkedPdb()
 
 @dataclass
 class MapConfig:
-    isotropic_regularization_weight: float = 10.0
+    isotropic_regularization_weight: float = 0.001
     opacity_regularization_weight: float = 0.000005
-    betas_regularization_weight: float = 200.0
     depth_regularization_weight: float = 0.0001
 
     pose_optim_lr_translation: float = 0.001
@@ -52,7 +51,7 @@ class MapConfig:
     scale_lr: float = 0.005
     color_lr: float = 0.005
     quat_lr: float = 0.005
-    beta_lr: float = 0.00005
+    log_uncertainty_lr: float = 0.0025
     # from binocular3DGS
     opacity_decay: float = 0.995
 
@@ -60,9 +59,8 @@ class MapConfig:
     background_color: tuple = (0.0, 0.0, 0.0)
 
     initial_number_of_gaussians: int = 10_000
-    initial_opacity: float = 0.5
+    initial_opacity: float = 0.3
     initial_scale: float = 1.0
-    initial_beta: float = 0.3
 
     device: str = 'cuda'
 
@@ -70,9 +68,9 @@ class MapConfig:
     optim_window_random_keyframes: int = 2
 
     num_iters_mapping: int = 15
-    num_iters_initialization: int = 1000
+    num_iters_initialization: int = 500
 
-    opacity_pruning_threshold: float = 0.5
+    opacity_pruning_threshold: float = 0.2
     size_pruning_threshold: int = 256
 
     prune_every: int = 199
@@ -85,7 +83,7 @@ class MapConfig:
     ssim_weight: float = 0.2  # in [0,1]
     num_iters_final: int = 2000
 
-    use_betas: bool = False
+    active_gs: bool = True
 
     min_visibility: int = 3
     visibility_pruning_window_size: int = 3
@@ -136,7 +134,6 @@ class Backend(torch.multiprocessing.Process):
             0.2 * self.conf.initial_scale,
             0.1,
             self.conf.initial_opacity,
-            self.conf.initial_beta,
             False,  # TODO parameterize this
         )
         self.insertion_3dgs = InsertUsingImagePlaneGradients(
@@ -144,9 +141,6 @@ class Backend(torch.multiprocessing.Process):
             0.01,
         )
         self.pruning_conditioning = PruneIllConditionedGaussians(3)
-
-        if not self.conf.use_betas:
-            self.conf.betas_regularization_weight = 0.0
 
         self.pose_graph = defaultdict(set)
         self.total_step = 0
@@ -211,7 +205,7 @@ class Backend(torch.multiprocessing.Process):
         window = [self.keyframes[i] for i in window]
         return window
 
-    def optimize_map(self, n_iters: int = None):
+    def optimize_map(self, n_iters: int = None, prune=True):
         if n_iters is None:
             n_iters = self.conf.num_iters_mapping
 
@@ -234,13 +228,18 @@ class Backend(torch.multiprocessing.Process):
                 render_depth=True,
             )
 
-            # unsqueeze so that broadcast multiplication works out
-            inv_betas = 1.0
-            if self.conf.use_betas:
-                inv_betas = outputs.betas.pow(-1.0).unsqueeze(-1)
-            photometric_loss = ((outputs.rgbs - gt_imgs) * inv_betas).square().mean()
+            if self.conf.active_gs:
+                photometric_loss = (outputs.rgbs - gt_imgs).square().sum(dim=-1)
+                photometric_loss = photometric_loss / (2 * outputs.betas.square())
+                photometric_loss = photometric_loss.mean()
+                photometric_loss = (
+                    photometric_loss + (outputs.betas.log().square() * 0.5).mean()
+                )
+            else:
+                photometric_loss = (outputs.rgbs - gt_imgs).square().mean()
 
-            visible_gaussians = outputs.n_touched.sum(dim=0) > 0
+            # visible_gaussians = outputs.n_touched.sum(dim=0) > 0
+            visible_gaussians = outputs.radii.sum(dim=0) > 0
             mean_scales = (
                 self.splats.scales[visible_gaussians]
                 .mean(dim=1, keepdim=True)
@@ -248,10 +247,9 @@ class Backend(torch.multiprocessing.Process):
                 .detach()
             )
             isotropic_loss = (
-                (self.splats.scales.exp()[visible_gaussians] - mean_scales).abs().mean()
+                (self.splats.scales.exp()[visible_gaussians] - mean_scales).abs().sum()
             )
-            betas_loss = self.splats.betas[visible_gaussians].mean()
-            opacity_loss = self.splats.opacities[visible_gaussians].mean()
+            # opacity_loss = self.splats.opacities[visible_gaussians].mean()
             depth_loss = total_variation_loss(
                 outputs.depthmaps, outputs.alphas[..., 0] > 0.4
             )
@@ -263,8 +261,7 @@ class Backend(torch.multiprocessing.Process):
             total_loss = (
                 (1.0 - self.conf.ssim_weight) * photometric_loss
                 + self.conf.isotropic_regularization_weight * isotropic_loss
-                + self.conf.opacity_regularization_weight * opacity_loss
-                + self.conf.betas_regularization_weight * betas_loss
+                #     + self.conf.opacity_regularization_weight * opacity_loss
                 + self.conf.depth_regularization_weight * depth_loss
                 + self.conf.ssim_weight * ssim_loss
             )
@@ -295,7 +292,6 @@ class Backend(torch.multiprocessing.Process):
 
             total_loss.backward()
 
-            prune = True
             if (self.total_step % 266) == 0:
                 self.insertion_3dgs.step(
                     self.splats,
@@ -304,13 +300,12 @@ class Backend(torch.multiprocessing.Process):
                     None,
                     None,
                 )
-                prune = False
 
             desc = (
                 f"[Mapping] keyframe {len(self.keyframes)} pm={photometric_loss.item():.4f}, "
                 f"loss={total_loss.item():.5f}, "
                 f"n_splats={self.splats.means.shape[0]:07}, "
-                f"mean_beta={self.splats.betas.exp().mean().item():.3f}"
+                f"mean_beta={self.splats.log_uncertainties.exp().mean().item():.3f}"
             )
             pbar.set_description(desc)
 
@@ -320,6 +315,11 @@ class Backend(torch.multiprocessing.Process):
                 print('Pausing map optimization')
                 self.pause_map_optim = True
                 break
+
+            with torch.no_grad():
+                self.splats.opacities.data[(outputs.radii > 0).sum(dim=0) > 1] *= (
+                    self.conf.opacity_decay
+                )
 
         gaussians_max_screen_size = torch.max(outputs.radii, axis=0).values
 
@@ -359,12 +359,6 @@ class Backend(torch.multiprocessing.Process):
         )
 
         last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
-        if len(self.keyframes) > 1:
-            with torch.no_grad():
-                self.splats.opacities.data[outputs.n_touched.sum(dim=0) > 1] = (
-                    self.splats.opacities.data[outputs.n_touched.sum(dim=0) > 1]
-                    * self.conf.opacity_decay
-                )
 
         self.last_kf_depthmap = outputs.depthmaps[0]
         self.last_kf_rgbs = outputs.rgbs[0]
@@ -476,9 +470,9 @@ class Backend(torch.multiprocessing.Process):
             params=[self.splats.colors],
             lr=self.conf.color_lr,
         )
-        self.splat_optimizers['betas'] = torch.optim.Adam(
-            params=[self.splats.betas],
-            lr=self.conf.beta_lr,
+        self.splat_optimizers['log_uncertainties'] = torch.optim.Adam(
+            params=[self.splats.log_uncertainties],
+            lr=self.conf.log_uncertainty_lr,
         )
         self.pose_optimizer = torch.optim.Adam(
             params=[torch.empty(0)],
@@ -672,7 +666,9 @@ class Backend(torch.multiprocessing.Process):
                     self.pause_map_optim = False
                     self.initialize(frame)
                     with self.splats_mutex:
-                        self.optimize_map(self.conf.num_iters_initialization)
+                        self.optimize_map(
+                            self.conf.num_iters_initialization, prune=False
+                        )
                     self.sync()
                     continue
                 case None:

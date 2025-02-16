@@ -65,7 +65,7 @@ def rasterization(
     channel_chunk: int = 32,
     camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole",
     covars: Optional[Tensor] = None,
-    log_betas: Optional[Tensor] = None,
+    log_uncertainties: Optional[Tensor] = None,
     visibility_min_T: float = 0.5,
 ) -> RasterizationOutput:
     """Rasterize a set of 3D Gaussians (N) to a batch of image planes (C).
@@ -110,7 +110,7 @@ def rasterization(
             and "fisheye". Default is "pinhole".
         covars: Optional covariance matrices of the Gaussians. If provided, the `quats` and
             `scales` will be ignored. [N, 3, 3], Default is None.
-        log_betas: Optional confidences (betas) for the Gaussians. [N,].
+        log_uncertainties: Optional confidences (betas) for the Gaussians. [N,].
 
     Returns:
         RasterizationOutput
@@ -143,8 +143,8 @@ def rasterization(
     opacities = torch.sigmoid(logit_opacities)
     colors = torch.sigmoid(logit_colors)
     scales = torch.exp(log_scales)
-    if log_betas is not None:
-        betas = torch.exp(log_betas)
+    if log_uncertainties is not None:
+        betas = torch.exp(log_uncertainties).clamp(min=0.01)
 
     # Project Gaussians to 2D. Directly pass in {quats, scales} is faster than precomputing covars.
     proj_results = fully_fused_projection(
@@ -208,20 +208,20 @@ def rasterization(
             # Turn [N, D] into [nnz, D]
             colors = colors[gaussian_ids]
             # Turn [N] into [nnz]
-            if log_betas is not None:
+            if log_uncertainties is not None:
                 betas = betas[gaussian_ids]
         else:
             # Turn [C, N, D] into [nnz, D]
             colors = colors[camera_ids, gaussian_ids]
             # Turn [C, N] into [nnz]
-            if log_betas is not None:
+            if log_uncertainties is not None:
                 betas = betas[camera_ids, gaussian_ids]
     else:
         if colors.dim() == 2:
             # Turn [N, D] into [C, N, D]
             colors = colors.expand(C, -1, -1)
             # Turn [N] into [C, N]
-            if log_betas is not None:
+            if log_uncertainties is not None:
                 betas = betas.expand(C, -1)
         else:
             # colors is already [C, N, D]
@@ -243,11 +243,12 @@ def rasterization(
     else:  # RGB
         pass
 
-    if log_betas is not None:
+    if log_uncertainties is not None:
         colors = torch.cat((colors, betas[..., None]), dim=-1)
         if backgrounds is not None:
             backgrounds = torch.cat(
-                [backgrounds, torch.full((C,), 1.0, device=backgrounds.device)], dim=-1
+                [backgrounds, torch.full((C, 1), 1.0, device=backgrounds.device).exp()],
+                dim=-1,
             )
         betas_index = colors.shape[-1] - 1
 
@@ -338,7 +339,7 @@ def rasterization(
     if render_mode in ["ED", "RGB+ED", "ED"]:
         # normalize the accumulated depth to get the expected depth
         meta['depthmaps'] = (meta['depthaps'] / render_alphas.clamp(min=1e-10),)
-    if log_betas is not None:
+    if log_uncertainties is not None:
         meta['betas'] = render_colors[..., betas_index]
     if render_mode not in ['D', 'ED']:
         render_colors = render_colors[..., :3]
