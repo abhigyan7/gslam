@@ -46,18 +46,25 @@ def average_translation_error(A: np.ndarray, B: np.ndarray) -> float:
     return ate
 
 
-def plot_trajectory(trajectories: list, labels: list[str], ax):
+def plot_trajectory(trajectories: list, labels: list[str], ax, keyframe_indices=None):
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     for trajectory, label in zip(trajectories, labels):
         ax.plot(trajectory[..., 1], trajectory[..., 2], label=label)
         ax.scatter(trajectory[[0], 1], trajectory[[0], 2], marker='x')
+        if keyframe_indices is not None and max(keyframe_indices) <= len(trajectory):
+            ax.scatter(
+                trajectory[keyframe_indices, 1],
+                trajectory[keyframe_indices, 2],
+                marker='o',
+            )
     ax.set_aspect('equal')
     ax.legend()
 
 
 def evaluate_trajectories(
     trajectories: dict[str, list[Frame]],
+    keyframe_indices: list[int] = None,
 ) -> tuple[plt.Figure, dict]:
     fig, axes = plt.subplots(1, len(trajectories))
     fig.set_figwidth(5 * len(trajectories))
@@ -76,7 +83,7 @@ def evaluate_trajectories(
         estimated_ts = np.array([t + c * R @ b[:3, 3] for b in estimated_Rts])
         gt_ts = gt_Rts[..., :3, 3]
 
-        plot_trajectory([gt_ts, estimated_ts], ['gt', traj_name], ax)
+        plot_trajectory([gt_ts, estimated_ts], ['gt', traj_name], ax, keyframe_indices)
         ax.set_aspect('equal')
         ax.set_box_aspect(1)
 
