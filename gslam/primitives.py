@@ -142,7 +142,7 @@ class Pose(torch.nn.Module):
         if not self.is_learnable:
             return self.Rt
         dRt = self.se3.Exp().matrix()
-        return self.Rt @ dRt
+        return dRt @ self.Rt
 
     def __deepcopy__(self, memo):
         '''Doing this because Rt isn't cloned properly'''
@@ -392,6 +392,7 @@ class Frame:
         }
         return Frame(**new_attributes)
 
+    @torch.no_grad()
     def strip(self):
         return Frame(
             None,

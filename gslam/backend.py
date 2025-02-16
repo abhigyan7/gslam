@@ -38,7 +38,7 @@ forked_pdb = ForkedPdb()
 
 @dataclass
 class MapConfig:
-    isotropic_regularization_weight: float = 0.001
+    isotropic_regularization_weight: float = 0.0005
     opacity_regularization_weight: float = 0.000005
     depth_regularization_weight: float = 0.0001
 
@@ -249,7 +249,6 @@ class Backend(torch.multiprocessing.Process):
             isotropic_loss = (
                 (self.splats.scales.exp()[visible_gaussians] - mean_scales).abs().sum()
             )
-            # opacity_loss = self.splats.opacities[visible_gaussians].mean()
             depth_loss = total_variation_loss(
                 outputs.depthmaps, outputs.alphas[..., 0] > 0.4
             )
@@ -261,7 +260,6 @@ class Backend(torch.multiprocessing.Process):
             total_loss = (
                 (1.0 - self.conf.ssim_weight) * photometric_loss
                 + self.conf.isotropic_regularization_weight * isotropic_loss
-                #     + self.conf.opacity_regularization_weight * opacity_loss
                 + self.conf.depth_regularization_weight * depth_loss
                 + self.conf.ssim_weight * ssim_loss
             )

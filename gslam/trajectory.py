@@ -42,7 +42,7 @@ def average_translation_error(A: np.ndarray, B: np.ndarray) -> float:
     R, c, t = kabsch_umeyama(A, B)
     aligned = np.array([t + c * R @ b for b in B])
     error = aligned - A
-    ate = np.sqrt(np.mean(np.sum(np.multiply(error, error), -1)))
+    ate = np.mean(np.sqrt(np.sum(np.multiply(error, error), -1)))
     return ate
 
 
