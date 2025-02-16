@@ -60,6 +60,8 @@ class TumRGB:
 
         gt_translations = gt_poses[nearest_timestamp_ids][:, :3]
         gt_quaternions = gt_poses[nearest_timestamp_ids][:, 3:]
+        # tum is xyzw, pyquaternion is wxyz
+        gt_quaternions = np.roll(gt_quaternions, 1, axis=1)
         gt_rotation_matrices = np.array(
             [Quaternion(*q).rotation_matrix for q in gt_quaternions]
         )
