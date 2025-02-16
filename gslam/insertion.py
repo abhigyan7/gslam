@@ -104,14 +104,12 @@ class InsertFromDepthMap(InsertionStrategy):
         no_depth_variance: float,
         min_alpha_for_depth: float,
         initial_opacity: float,
-        initial_beta: float,
         insert_in_regions_with_depth: bool = True,
     ):
         self.depth_variance = depth_variance
         self.no_depth_variance = no_depth_variance
         self.min_alpha_for_depth = min_alpha_for_depth
         self.initial_opacity = initial_opacity
-        self.initial_beta = initial_beta
         self.insert_in_regions_with_depth = insert_in_regions_with_depth
 
     @torch.no_grad()
@@ -211,7 +209,7 @@ class InsertFromDepthMap(InsertionStrategy):
         means = means @ R.t() + t
 
         if splats.scales.size().numel() > 0:
-            scales = torch.exp(splats.scales).mean(dim=0).tile([N, 1])
+            scales = torch.exp(splats.scales).median(dim=0)[0].tile([N, 1])
         else:
             print("Found no scales")
             avg_distance_to_nearest_3_neighbors = torch.sqrt(
@@ -227,7 +225,8 @@ class InsertFromDepthMap(InsertionStrategy):
                 torch.full((N,), self.initial_opacity, device=device)
             ),
             'quats': torch.rand((N, 4), device=device),
-            'betas': torch.log(torch.full((N,), self.initial_beta, device=device)),
+            # 'log_uncertainties': torch.rand(N, device=device),
+            'log_uncertainties': torch.ones((N,), device=device),
             'ages': torch.full((N,), frame.index, device=device).long(),
         }
 

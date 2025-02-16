@@ -160,6 +160,8 @@ class Pose(torch.nn.Module):
 
     @torch.no_grad()
     def normalize(self):
+        self.Rt = self.forward()
+        self.se3.multiply_(0.0)
         return
 
 
@@ -221,10 +223,11 @@ class Pose_se3(torch.nn.Module):
 
         return torch.matmul(self.Rt, ret)
 
+    @torch.no_grad()
     def to_qt(
         self,
     ):
-        pose = self()
+        pose = self().detach()
         R = pose[:3, :3]
         t = pose[:3, 3]
         return unvmap(matrix_to_quaternion)(R), t

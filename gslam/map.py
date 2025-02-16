@@ -17,7 +17,7 @@ class GaussianSplattingData(torch.nn.Module):
         'scales',
         'opacities',
         'colors',
-        'betas',
+        'log_uncertainties',
         'ages',
     ]
 
@@ -28,7 +28,7 @@ class GaussianSplattingData(torch.nn.Module):
         scales,  # scales of covariance matrices
         opacities,  # alpha of gaussians
         colors,
-        betas,  # log of something akin to variance of gaussians
+        log_uncertainties,  # log of something akin to variance of gaussians
         ages,  # which frame each gaussian was inserted in
     ):  # RGB values of gaussians
         super().__init__()
@@ -37,7 +37,9 @@ class GaussianSplattingData(torch.nn.Module):
         self.scales: torch.nn.Parameter = torch.nn.Parameter(scales)
         self.opacities: torch.nn.Parameter = torch.nn.Parameter(opacities)
         self.colors: torch.nn.Parameter = torch.nn.Parameter(colors)
-        self.betas: torch.nn.Parameter = torch.nn.Parameter(betas)
+        self.log_uncertainties: torch.nn.Parameter = torch.nn.Parameter(
+            log_uncertainties
+        )
         self.ages: torch.nn.Parameter = torch.nn.Parameter(ages, requires_grad=False)
 
     def forward(
@@ -64,8 +66,12 @@ class GaussianSplattingData(torch.nn.Module):
             height=cameras[0].height,
             render_mode=render_mode,
             packed=False,
-            log_betas=self.betas,
+            log_uncertainties=self.log_uncertainties,
             visibility_min_T=visibility_min_T,
+            backgrounds=torch.Tensor([0.0, 0.0, 0.0])
+            .tile([len(cameras), 1])
+            .float()
+            .to(self.means.device),
         )
 
     @staticmethod
@@ -87,7 +93,7 @@ class GaussianSplattingData(torch.nn.Module):
             self.scales.clone().detach(),
             self.opacities.clone().detach(),
             self.colors.clone().detach(),
-            self.betas.clone().detach(),
+            self.log_uncertainties.clone().detach(),
             self.ages.clone(),
         )
 
@@ -99,7 +105,7 @@ class GaussianSplattingData(torch.nn.Module):
                 'scales': self.scales,
                 'opacities': self.opacities,
                 'colors': self.colors,
-                'betas': self.betas,
+                'log_uncertainties': self.log_uncertainties,
                 'ages': self.ages,
             }
         )
