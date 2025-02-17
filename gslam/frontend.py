@@ -37,13 +37,15 @@ fpdb = ForkedPdb()
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 150
+    num_tracking_iters: int = 100
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'active-nerf'
-    pose_optim_lr: float = 0.002
+
+    pose_optim_lr: float = 0.01
+    pose_optim_lr_decay: float = 0.95
 
     method: Literal['igs', 'warp'] = 'igs'
 
-    pose_regularization: float = 0.01
+    # pose_regularization: float = 0.0
 
 
 class Frontend(mp.Process):
@@ -138,7 +140,9 @@ class Frontend(mp.Process):
                 ]
             )
 
-            # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.99)
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                optimizer, self.conf.pose_optim_lr_decay
+            )
             n_iters = self.conf.num_tracking_iters
         else:
             # constant motion model
@@ -155,7 +159,9 @@ class Frontend(mp.Process):
                 ]
             )
 
-            # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 1.0)
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                optimizer, self.conf.pose_optim_lr_decay
+            )
             n_iters = self.conf.num_tracking_iters
 
         _loss = 0.0
@@ -187,11 +193,11 @@ class Frontend(mp.Process):
 
             _loss = loss.item()
 
-            loss += new_frame.pose.se3.norm() * self.conf.pose_regularization
+            # loss += new_frame.pose.se3.norm() * self.conf.pose_regularization
 
             loss.backward()
             optimizer.step()
-            # scheduler.step()
+            scheduler.step()
             optimizer.zero_grad()
 
             drdt = new_frame.pose.se3.detach().cpu().numpy()
@@ -200,7 +206,7 @@ class Frontend(mp.Process):
             )
             new_frame.pose.normalize()
 
-            if np.linalg.norm(drdt) < 5e-5:
+            if np.linalg.norm(drdt) < 2e-4:
                 break
 
         log_frame(new_frame, outputs=outputs)
