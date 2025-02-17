@@ -27,6 +27,7 @@ from .primitives import Frame, Pose, matrix_to_quaternion
 from .rasterization import RasterizationOutput
 from .trajectory import evaluate_trajectories
 from .utils import torch_image_to_np, torch_to_pil, false_colormap, ForkedPdb, unvmap
+from .visualization import log_frame, get_blueprint
 from .warp import Warp
 
 
@@ -159,6 +160,7 @@ class Frontend(mp.Process):
 
         _loss = 0.0
         outputs = None
+        start_time = time.time()
 
         for i in (
             pbar := tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}")
@@ -201,8 +203,10 @@ class Frontend(mp.Process):
             if np.linalg.norm(drdt) < 5e-5:
                 break
 
-        self.log_frame(new_frame)
-        self.save_tracking_stats(new_frame, _loss, outputs)
+        log_frame(new_frame, outputs=outputs)
+        self.save_tracking_stats(
+            new_frame, _loss, outputs, tracking_time=time.time() - start_time
+        )
         self.frames.append(new_frame.strip())
 
         self.add_frame_to_backend(new_frame)
@@ -229,7 +233,7 @@ class Frontend(mp.Process):
         self.pose_graph = pose_graph
 
         for kf in self.keyframes.values():
-            self.log_frame(kf, name=f'/tracking/kf/{kf.index}')
+            log_frame(kf, name=f'/tracking/kf/{kf.index}')
         line_strips = []
         for kf_i in self.pose_graph:
             for kf_j in self.pose_graph[kf_i]:
@@ -244,7 +248,11 @@ class Frontend(mp.Process):
             rr.LineStrips3D(line_strips, colors=[[255, 255, 255]]),
         )
 
-        self.dump_pointcloud()
+        # dump splats only after 15 frames have passed since the last time we did it
+        if (self.frames[-1].index - self.last_time_we_sent_splats_to_rerun) > 15:
+            self.dump_pointcloud()
+            self.last_time_we_sent_splats_to_rerun = self.frames[-1].index
+
         return
 
     def sync_at_end(self, splats: GaussianSplattingData, keyframes: dict[int, Frame]):
@@ -288,7 +296,6 @@ class Frontend(mp.Process):
                 half_sizes=radii.cpu().numpy(),
                 centers=self.splats.means.cpu().numpy(),
                 quaternions=q,
-                # colors=self.splats.colors.sigmoid().cpu().numpy(),
                 colors=torch.sigmoid(
                     torch.cat(
                         [
@@ -360,34 +367,6 @@ class Frontend(mp.Process):
 
         return {'ssim': np.mean(ssims), 'psnr': np.mean(psnrs)}
 
-    def log_frame(self, f: Frame, name: str = "/tracking/pose") -> None:
-        q, t = f.pose.to_qt()
-        q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
-        t = t.detach().cpu().numpy().reshape(-1)
-        rr.log(
-            name,
-            rr.Transform3D(
-                rotation=rr.datatypes.Quaternion(xyzw=q),
-                translation=t,
-                from_parent=True,
-            ),
-        )
-
-        rr.log(
-            f"{name}/image",
-            rr.Pinhole(
-                resolution=[f.camera.width, f.camera.height],
-                focal_length=[
-                    f.camera.intrinsics[0, 0].item(),
-                    f.camera.intrinsics[1, 1].item(),
-                ],
-                principal_point=[
-                    f.camera.intrinsics[0, 2].item(),
-                    f.camera.intrinsics[1, 2].item(),
-                ],
-            ),
-        )
-
     @torch.no_grad
     def evaluate_trajectory(self) -> dict:
         fig, ates = evaluate_trajectories(
@@ -445,10 +424,23 @@ class Frontend(mp.Process):
             f'ffmpeg -hide_banner -loglevel error -y -framerate 30 -pattern_type glob -i "{os.path.normpath(self.output_dir)}/final_depths/*.jpg" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -pix_fmt yuv420p {self.output_dir / "final_depths.mp4"}'
         )
 
-    def save_tracking_stats(self, new_frame, loss, outputs: RasterizationOutput = None):
+    def save_tracking_stats(
+        self,
+        new_frame,
+        loss,
+        outputs: RasterizationOutput = None,
+        tracking_time: float = None,
+    ):
         i = new_frame.index
 
         rr.log('/tracking/loss', rr.Scalar(loss))
+        rr.log(
+            '/tracking/frame_index',
+            rr.TextDocument(f"# {i}", media_type=rr.MediaType.MARKDOWN),
+        )
+
+        if tracking_time is not None:
+            rr.log('/tracking/fps', rr.Scalar(1.0 / tracking_time))
 
         torch_to_pil(new_frame.img).save(self.output_dir / f'gt/{i:08}.jpg')
 
@@ -483,6 +475,7 @@ class Frontend(mp.Process):
         rr.init('gslam', recording_id=f'gslam_1_{int(time.time()) % 10000}', spawn=True)
         # rr.save(self.output_dir / 'rr-fe.rrd')
         rr.log("/tracking", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
+        rr.send_blueprint(get_blueprint())
 
         self.warp = None
 
@@ -490,6 +483,7 @@ class Frontend(mp.Process):
         self.waiting_for_sync = False
 
         last_time_we_heard_from_backend = time.time()
+        self.last_time_we_sent_splats_to_rerun = -100000000
 
         self.done = False
 
@@ -541,6 +535,9 @@ class Frontend(mp.Process):
                         json.dump(metrics, f)
                         f.write('\n')
                     self.save_trajectories()
+
+                    rr.log('/tracking/ate/pg', rr.Scalar(metrics['ate_keyframes']))
+                    rr.log('/tracking/ate/tracking', rr.Scalar(metrics['ate_tracking']))
 
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')
