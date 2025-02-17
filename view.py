@@ -10,6 +10,7 @@ import viser
 
 from gslam.map import GaussianSplattingData
 from gslam.primitives import Pose, Camera
+from gslam import viewer
 
 torch.serialization.add_safe_globals([GaussianSplattingData, set])
 
@@ -33,14 +34,14 @@ def main(args):
         viewmat = c2w.inverse()
 
         camera = Camera(K, height, width)
-        pose = Pose(viewmat, False)
+        pose = Pose(viewmat, is_learnable=False)
 
         outputs = splats([camera], [pose])
         render_rgbs = outputs.rgbs[0, ...].cpu().numpy()
         return render_rgbs
 
     server = viser.ViserServer(port=args.port, verbose=False)
-    _ = nerfview.Viewer(
+    _ = viewer.Viewer(
         server=server,
         render_fn=viewer_render_fn,
         mode="rendering",
