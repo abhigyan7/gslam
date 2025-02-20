@@ -280,8 +280,10 @@ class InsertUsingImagePlaneGradients(InsertionStrategy):
 
         if num_duplicate > 0:
             duplicated_splats = self._duplicate(splats, mask=to_duplicate)
+            duplicated_splats['log_uncertainties'].fill_(1.0)
         if num_split > 0:
             split_splats = self._split(splats, mask=to_split)
+            split_splats['log_uncertainties'].fill_(1.0)
 
         if num_duplicate > 0:
             self._add_new_splats(splats, optimizers, duplicated_splats)

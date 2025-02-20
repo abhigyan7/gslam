@@ -40,12 +40,12 @@ class TrackingConfig:
     num_tracking_iters: int = 100
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'active-nerf'
 
-    pose_optim_lr: float = 0.01
-    pose_optim_lr_decay: float = 0.95
+    pose_optim_lr: float = 0.001
+    pose_optim_lr_decay: float = 0.99
 
     method: Literal['igs', 'warp'] = 'igs'
 
-    # pose_regularization: float = 0.0
+    pose_regularization: float = 0.1
 
 
 class Frontend(mp.Process):
@@ -193,7 +193,7 @@ class Frontend(mp.Process):
 
             _loss = loss.item()
 
-            # loss += new_frame.pose.se3.norm() * self.conf.pose_regularization
+            loss += new_frame.pose.se3.norm() * self.conf.pose_regularization
 
             loss.backward()
             optimizer.step()
@@ -233,7 +233,7 @@ class Frontend(mp.Process):
     ):
         self.keyframes = deepcopy(keyframes)
         self.reference_depthmap = depthmap.clone()
-        self.reference_frame = keyframes[sorted(keyframes.keys())[-1]]
+        self.reference_frame = self.keyframes[sorted(self.keyframes.keys())[-1]]
         self.reference_rgbs = rgbs
         self.splats = splats
         self.pose_graph = pose_graph
@@ -542,8 +542,13 @@ class Frontend(mp.Process):
                         f.write('\n')
                     self.save_trajectories()
 
-                    rr.log('/tracking/ate/pg', rr.Scalar(metrics['ate_keyframes']))
-                    rr.log('/tracking/ate/tracking', rr.Scalar(metrics['ate_tracking']))
+                    rr.log(
+                        '/tracking/ate/pg', rr.Scalar(metrics.get('ate_keyframes', 0.0))
+                    )
+                    rr.log(
+                        '/tracking/ate/tracking',
+                        rr.Scalar(metrics.get('ate_tracking', 0.0)),
+                    )
 
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')
