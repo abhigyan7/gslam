@@ -40,10 +40,9 @@ forked_pdb = ForkedPdb()
 class MapConfig:
     isotropic_regularization_weight: float = 0.0005
     opacity_regularization_weight: float = 0.000005
-    depth_regularization_weight: float = 0.0001
+    depth_regularization_weight: float = 0.000001
 
-    pose_optim_lr_translation: float = 0.001
-    pose_optim_lr_rotation: float = 0.003
+    pose_optim_lr: float = 0.003
 
     # 3dgs schedules means_lr, might need to look into this
     means_lr: float = 0.00016
@@ -91,7 +90,7 @@ class MapConfig:
 
     # pose graph optimization
     enable_pgo: bool = False
-    pgo_loss_weight: float = 0.1
+    pgo_loss_weight: float = 0.01
 
     kf_cov = 0.9
     kf_oc = 0.3
@@ -107,6 +106,34 @@ def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.
     tv_h = (v_h).pow(2).sum()
     tv_w = (v_w).pow(2).sum()
     return tv_h + tv_w
+
+
+def edge_aware_tv(
+    depth: torch.Tensor, rgb: torch.Tensor, mask: torch.Tensor = None
+) -> torch.Tensor:
+    """
+    Args:
+        depth: [batch, H, W]
+        rgb: [batch, H, W, 3]
+        mask: [mask, H, W, 1]
+    """
+    grad_depth_x = torch.abs(depth[..., :, :-1, None] - depth[..., :, 1:, None])
+    grad_depth_y = torch.abs(depth[..., :-1, :, None] - depth[..., 1:, :, None])
+
+    grad_img_x = torch.mean(
+        torch.abs(rgb[..., :, :-1, :] - rgb[..., :, 1:, :]), -1, keepdim=True
+    )
+    grad_img_y = torch.mean(
+        torch.abs(rgb[..., :-1, :, :] - rgb[..., 1:, :, :]), -1, keepdim=True
+    )
+
+    grad_depth_x *= torch.exp(-grad_img_x)
+    grad_depth_y *= torch.exp(-grad_img_y)
+
+    return (
+        grad_depth_x[mask[..., :, :-1, None]].sum()
+        + grad_depth_y[mask[..., :-1, :, None]].sum()
+    )
 
 
 class Backend(torch.multiprocessing.Process):
@@ -205,7 +232,7 @@ class Backend(torch.multiprocessing.Process):
         window = [self.keyframes[i] for i in window]
         return window
 
-    def optimize_map(self, n_iters: int = None, prune=True):
+    def optimize_map(self, n_iters: int = None, prune=True, regularize=True):
         if n_iters is None:
             n_iters = self.conf.num_iters_mapping
 
@@ -238,7 +265,6 @@ class Backend(torch.multiprocessing.Process):
             else:
                 photometric_loss = (outputs.rgbs - gt_imgs).square().mean()
 
-            # visible_gaussians = outputs.n_touched.sum(dim=0) > 0
             visible_gaussians = outputs.radii.sum(dim=0) > 0
             mean_scales = (
                 self.splats.scales[visible_gaussians]
@@ -249,8 +275,10 @@ class Backend(torch.multiprocessing.Process):
             isotropic_loss = (
                 (self.splats.scales.exp()[visible_gaussians] - mean_scales).abs().sum()
             )
-            depth_loss = total_variation_loss(
-                outputs.depthmaps, outputs.alphas[..., 0] > 0.4
+            depth_loss = edge_aware_tv(
+                outputs.depthmaps,
+                outputs.rgbs,
+                outputs.alphas[..., 0] > 0.4,
             )
             ssim_loss = 1.0 - fused_ssim(
                 outputs.rgbs.permute(0, 3, 1, 2),
@@ -259,10 +287,11 @@ class Backend(torch.multiprocessing.Process):
             )
             total_loss = (
                 (1.0 - self.conf.ssim_weight) * photometric_loss
-                + self.conf.isotropic_regularization_weight * isotropic_loss
-                + self.conf.depth_regularization_weight * depth_loss
                 + self.conf.ssim_weight * ssim_loss
+                + self.conf.isotropic_regularization_weight * isotropic_loss
             )
+            if regularize:
+                total_loss += +self.conf.depth_regularization_weight * depth_loss
 
             if self.conf.enable_pgo and len(self.pose_graph) > 0:
                 kf_1 = random.sample(sorted(self.pose_graph.keys()), 1)[0]
@@ -290,7 +319,7 @@ class Backend(torch.multiprocessing.Process):
 
             total_loss.backward()
 
-            if (self.total_step % 266) == 0:
+            if (self.total_step % 100) == 0:
                 self.insertion_3dgs.step(
                     self.splats,
                     self.splat_optimizers,
@@ -298,6 +327,7 @@ class Backend(torch.multiprocessing.Process):
                     None,
                     None,
                 )
+                prune = False
 
             desc = (
                 f"[Mapping] keyframe {len(self.keyframes)} pm={photometric_loss.item():.4f}, "
@@ -531,16 +561,10 @@ class Backend(torch.multiprocessing.Process):
         )
 
         self.keyframes[new_frame.index] = new_frame
-        # self.pose_optimizer.add_param_group(
-        #     {
-        #         'params': new_frame.pose.dt,
-        #         'lr': self.conf.pose_optim_lr_translation,
-        #     }
-        # )
         self.pose_optimizer.add_param_group(
             {
                 'params': new_frame.pose.parameters(),
-                'lr': self.conf.pose_optim_lr_rotation,
+                'lr': self.conf.pose_optim_lr,
             }
         )
 
@@ -695,7 +719,9 @@ class Backend(torch.multiprocessing.Process):
                     self.initialize(frame)
                     with self.splats_mutex:
                         self.optimize_map(
-                            self.conf.num_iters_initialization, prune=False
+                            self.conf.num_iters_initialization,
+                            prune=False,
+                            regularize=False,
                         )
                     self.sync()
                     continue

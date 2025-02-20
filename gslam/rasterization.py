@@ -67,6 +67,7 @@ def rasterization(
     covars: Optional[Tensor] = None,
     log_uncertainties: Optional[Tensor] = None,
     visibility_min_T: float = 0.5,
+    mask: Optional[Tensor] = None,
 ) -> RasterizationOutput:
     """Rasterize a set of 3D Gaussians (N) to a batch of image planes (C).
 
@@ -111,6 +112,7 @@ def rasterization(
         covars: Optional covariance matrices of the Gaussians. If provided, the `quats` and
             `scales` will be ignored. [N, 3, 3], Default is None.
         log_uncertainties: Optional confidences (betas) for the Gaussians. [N,].
+        mask: Optional boolean mask over Gaussians. [N,].
 
     Returns:
         RasterizationOutput

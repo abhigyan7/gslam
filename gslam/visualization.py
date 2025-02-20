@@ -12,7 +12,9 @@ from .utils import false_colormap, torch_to_pil
 
 @torch.no_grad()
 def log_frame(
-    f: Frame, name: str = "/tracking/pose", outputs: RasterizationOutput = None
+    f: Frame,
+    name: str = "/tracking/pose",
+    outputs: RasterizationOutput = None,
 ) -> None:
     q, t = f.pose.to_qt()
     q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
@@ -49,7 +51,7 @@ def log_frame(
         errormap = torch_to_pil(errormap)
         rr.log(f"{name}/errormap", rr.Image(errormap).compress(90))
 
-        betas = false_colormap(outputs.betas[0].log())
+        betas = false_colormap(outputs.betas[0].clip(max=2 * 2.7172))
         rr.log(f"{name}/uncertainty", rr.Image(betas).compress(70))
 
         depths = outputs.depthmaps[0]
