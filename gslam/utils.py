@@ -152,3 +152,19 @@ class StopOnPlateau:
             self.counter = 0
         self.last_loss = loss
         return False
+
+
+# A class that does absolutely nothing
+# Useful to turn rerun logs into no-ops
+class BlackHole:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __get_attr__(self, name):
+        return self
+
+    def __set_attr__(self, name, val):
+        pass
+
+    def __call__(self, *args, **kwargs):
+        return self
