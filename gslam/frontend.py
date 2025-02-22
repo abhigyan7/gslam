@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 import time
 from typing import List, Literal, assert_never
 
@@ -40,12 +40,12 @@ class TrackingConfig:
     num_tracking_iters: int = 100
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'active-nerf'
 
-    pose_optim_lr: float = 0.001
+    pose_optim_lr: float = 0.002
     pose_optim_lr_decay: float = 0.99
 
     method: Literal['igs', 'warp'] = 'igs'
 
-    pose_regularization: float = 0.1
+    pose_regularization: float = 0
 
 
 class Frontend(mp.Process):
@@ -209,9 +209,19 @@ class Frontend(mp.Process):
             if np.linalg.norm(drdt) < 2e-4:
                 break
 
-        log_frame(new_frame, outputs=outputs)
-        self.save_tracking_stats(
-            new_frame, _loss, outputs, tracking_time=time.time() - start_time
+        Thread(
+            target=log_frame,
+            args=(new_frame,),
+            kwargs={
+                "outputs": outputs,
+                "loss": _loss,
+                "tracking_time": time.time() - start_time,
+            },
+        ).start()
+        Thread(
+            self.save_tracking_stats,
+            args=(new_frame, _loss, outputs),
+            kwargs={"tracking_time": time.time() - start_time},
         )
         self.frames.append(new_frame.strip())
 
@@ -438,15 +448,6 @@ class Frontend(mp.Process):
         tracking_time: float = None,
     ):
         i = new_frame.index
-
-        rr.log('/tracking/loss', rr.Scalar(loss))
-        rr.log(
-            '/tracking/frame_index',
-            rr.TextDocument(f"# {i}", media_type=rr.MediaType.MARKDOWN),
-        )
-
-        if tracking_time is not None:
-            rr.log('/tracking/fps', rr.Scalar(1.0 / tracking_time))
 
         torch_to_pil(new_frame.img).save(self.output_dir / f'gt/{i:08}.jpg')
 

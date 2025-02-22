@@ -97,6 +97,31 @@ class GaussianSplattingData(torch.nn.Module):
             self.ages.clone(),
         )
 
+    def mask(self, m) -> Self:
+        return GaussianSplattingData(
+            self.means[m, :],
+            self.quats[m, :],
+            self.scales[m, :],
+            self.opacities[m],
+            self.colors[m, :],
+            self.log_uncertainties[m],
+            self.ages[m],
+        )
+
+    def no_grad_clone(self) -> Self:
+        ret = GaussianSplattingData(
+            self.means.clone().detach(),
+            self.quats.clone().detach(),
+            self.scales.clone().detach(),
+            self.opacities.clone().detach(),
+            self.colors.clone().detach(),
+            self.log_uncertainties.clone().detach(),
+            self.ages.clone(),
+        )
+
+        [ret.__getattr__(p).requires_grad_(False) for p in self._per_splat_params]
+        return ret
+
     def as_dict(self):
         return torch.nn.ParameterDict(
             {
