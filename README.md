@@ -5,7 +5,7 @@ Monocular SLAM using Gaussian Splatting.
 - Create an env from the spec file
 
 ``` sh
-conda create -f environment.yml
+conda env create -f environment.yml
 ```
 
 - Install [https://github.com/abhigyan7/gsplat/tree/gslam](abhigyan7/gsplat/tree/gslam)
