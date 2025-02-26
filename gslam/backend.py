@@ -21,7 +21,7 @@ from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .pose_graph import add_constraint
-from .primitives import Frame, Pose, Camera
+from .primitives import Frame, PoseZhou as Pose, Camera
 from .pruning import (
     PruneLowOpacity,
     PruneLargeGaussians,
@@ -480,7 +480,7 @@ class Backend(torch.multiprocessing.Process):
         for optimizer in self.splat_optimizers.values():
             optimizer.step()
         self.pose_optimizer.step()
-        [kf.pose.normalize() for kf in self.keyframes.values()]
+        # [kf.pose.normalize() for kf in self.keyframes.values()]
 
     def initialize_optimizers(self):
         # TODO fix these LRs

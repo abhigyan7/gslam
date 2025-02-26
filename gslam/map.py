@@ -42,6 +42,11 @@ class GaussianSplattingData(torch.nn.Module):
         )
         self.ages: torch.nn.Parameter = torch.nn.Parameter(ages, requires_grad=False)
 
+        self.register_buffer(
+            'background',
+            torch.tensor([0.0, 0.0, 0.0], device=self.means.device).float(),
+        )
+
     def forward(
         self,
         cameras: List[Camera],
@@ -68,10 +73,7 @@ class GaussianSplattingData(torch.nn.Module):
             packed=False,
             log_uncertainties=self.log_uncertainties,
             visibility_min_T=visibility_min_T,
-            backgrounds=torch.Tensor([0.0, 0.0, 0.0])
-            .tile([len(cameras), 1])
-            .float()
-            .to(self.means.device),
+            backgrounds=self.background.tile([len(cameras), 1]),
         )
 
     @staticmethod
