@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 import time
 from typing import List, Literal, assert_never
 
@@ -23,7 +23,7 @@ from PIL import Image
 
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
-from .primitives import Frame, Pose, matrix_to_quaternion
+from .primitives import Frame, PoseZhou as Pose, matrix_to_quaternion
 from .rasterization import RasterizationOutput
 from .trajectory import evaluate_trajectories
 from .utils import torch_image_to_np, torch_to_pil, false_colormap, ForkedPdb, unvmap
@@ -40,12 +40,12 @@ class TrackingConfig:
     num_tracking_iters: int = 100
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'active-nerf'
 
-    pose_optim_lr: float = 0.001
+    pose_optim_lr: float = 0.002
     pose_optim_lr_decay: float = 0.99
 
-    method: Literal['igs', 'warp'] = 'igs'
+    method: Literal['igs', 'warp', 'flow'] = 'igs'
 
-    pose_regularization: float = 0.1
+    pose_regularization: float = 0
 
 
 class Frontend(mp.Process):
@@ -108,6 +108,15 @@ class Frontend(mp.Process):
             case _:
                 assert_never(self.conf.photometric_loss)
 
+    def tracking_residual(
+        self,
+        gt_img: torch.Tensor,
+        rendered_img: torch.Tensor,
+        betas: torch.Tensor = None,
+    ) -> torch.Tensor:
+        error = rendered_img - gt_img
+        return error.square().sum(dim=-1) * betas.pow(-2.0)
+
     def initialize(self, new_frame: Frame):
         pose = torch.eye(4, device=self.conf.device)
         new_frame.pose = Pose(pose.detach()).to(self.conf.device)
@@ -153,7 +162,7 @@ class Frontend(mp.Process):
             optimizer = torch.optim.Adam(
                 [
                     {
-                        'params': new_frame.pose.se3,
+                        'params': new_frame.pose.parameters(),
                         'lr': self.conf.pose_optim_lr,
                     }
                 ]
@@ -169,7 +178,7 @@ class Frontend(mp.Process):
         start_time = time.time()
 
         for i in (
-            pbar := tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}")
+            _pbar := tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}")
         ):
             if self.conf.method == 'igs':
                 outputs = self.splats(
@@ -191,27 +200,42 @@ class Frontend(mp.Process):
                 masked_gt = new_frame.img[keep_mask, ...]
                 loss = F.l1_loss(masked_result, masked_gt)
 
-            _loss = loss.item()
+            # _loss = loss.item()
 
-            loss += new_frame.pose.se3.norm() * self.conf.pose_regularization
+            # loss += new_frame.pose.se3.norm() * self.conf.pose_regularization
 
             loss.backward()
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
 
-            drdt = new_frame.pose.se3.detach().cpu().numpy()
-            pbar.set_description(
-                f"[Tracking] frame {len(self.frames)}| loss: {_loss:.8f}| {np.linalg.norm(drdt)}"
-            )
-            new_frame.pose.normalize()
+            # drdt = new_frame.pose.se3.detach().cpu().numpy()
+            # pbar.set_description(
+            #     f"[Tracking] frame {len(self.frames)}| loss: {_loss:.8f} "
+            # )
+            # new_frame.pose.normalize()
 
-            if np.linalg.norm(drdt) < 2e-4:
-                break
+            # if np.linalg.norm(drdt) < 2e-4:
+            #     break
+            if (i + 1) == n_iters:
+                _loss = loss.item()
 
-        log_frame(new_frame, outputs=outputs)
-        self.save_tracking_stats(
-            new_frame, _loss, outputs, tracking_time=time.time() - start_time
+        Thread(
+            target=log_frame,
+            args=(new_frame,),
+            kwargs={
+                "outputs": outputs,
+                "loss": _loss,
+                "tracking_time": time.time() - start_time,
+            },
+        ).start()
+        Thread(
+            self.save_tracking_stats,
+            args=(new_frame, _loss),
+            kwargs={
+                "tracking_time": time.time() - start_time,
+                'outputs': outputs,
+            },
         )
         self.frames.append(new_frame.strip())
 
@@ -438,15 +462,6 @@ class Frontend(mp.Process):
         tracking_time: float = None,
     ):
         i = new_frame.index
-
-        rr.log('/tracking/loss', rr.Scalar(loss))
-        rr.log(
-            '/tracking/frame_index',
-            rr.TextDocument(f"# {i}", media_type=rr.MediaType.MARKDOWN),
-        )
-
-        if tracking_time is not None:
-            rr.log('/tracking/fps', rr.Scalar(1.0 / tracking_time))
 
         torch_to_pil(new_frame.img).save(self.output_dir / f'gt/{i:08}.jpg')
 

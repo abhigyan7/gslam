@@ -21,7 +21,7 @@ from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .pose_graph import add_constraint
-from .primitives import Frame, Pose, Camera
+from .primitives import Frame, PoseZhou as Pose, Camera
 from .pruning import (
     PruneLowOpacity,
     PruneLargeGaussians,
@@ -41,14 +41,15 @@ class MapConfig:
     isotropic_regularization_weight: float = 0.0005
     opacity_regularization_weight: float = 0.000005
     depth_regularization_weight: float = 0.000001
+    beta_ema_weight: float = 0.98
 
     pose_optim_lr: float = 0.003
 
     # 3dgs schedules means_lr, might need to look into this
-    means_lr: float = 0.00016
+    means_lr: float = 0.0016
     opacity_lr: float = 0.025
     scale_lr: float = 0.005
-    color_lr: float = 0.005
+    color_lr: float = 0.01
     quat_lr: float = 0.005
     log_uncertainty_lr: float = 0.0025
     # from binocular3DGS
@@ -67,7 +68,7 @@ class MapConfig:
     optim_window_random_keyframes: int = 2
 
     num_iters_mapping: int = 15
-    num_iters_initialization: int = 3000
+    num_iters_initialization: int = 110
 
     opacity_pruning_threshold: float = 0.2
     size_pruning_threshold: int = 256
@@ -93,7 +94,7 @@ class MapConfig:
     pgo_loss_weight: float = 0.01
 
     kf_cov = 0.9
-    kf_oc = 0.3
+    kf_oc = 0.99
     kf_m = 0.3
 
 
@@ -239,7 +240,7 @@ class Backend(torch.multiprocessing.Process):
         radii = None
         n_touched = None
 
-        early_stopper = StopOnPlateau(10, 0.05)
+        early_stopper = StopOnPlateau(3, 0.012)
 
         for step in (pbar := tqdm.trange(n_iters)):
             self.total_step += 1
@@ -319,6 +320,10 @@ class Backend(torch.multiprocessing.Process):
 
             total_loss.backward()
 
+            # with torch.no_grad():
+            #     self.splats.betas.mul_(self.conf.beta_ema_weight)
+            #     self.splats.betas.add_((1-self.conf.beta_ema_weight) * self.splats.params.grad.norm())
+
             if (self.total_step % 100) == 0:
                 self.insertion_3dgs.step(
                     self.splats,
@@ -339,7 +344,7 @@ class Backend(torch.multiprocessing.Process):
 
             self.step_all_optimizers()
 
-            if early_stopper.stop(total_loss.item()):
+            if early_stopper.stop(photometric_loss.item()):
                 print('Pausing map optimization')
                 self.pause_map_optim = True
                 break
@@ -388,7 +393,7 @@ class Backend(torch.multiprocessing.Process):
 
         # last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
         last_kf.visible_gaussians = outputs.radii.sum(dim=0) > 0
-
+        self.last_outputs = outputs
         self.last_kf_depthmap = outputs.depthmaps[0]
         self.last_kf_rgbs = outputs.rgbs[0]
 
@@ -449,7 +454,8 @@ class Backend(torch.multiprocessing.Process):
                 deepcopy(self.keyframes),
                 self.last_kf_depthmap.detach(),
                 self.last_kf_rgbs.detach(),
-                deepcopy(self.splats),
+                # deepcopy(self.splats),
+                self.splats.mask(self.last_outputs.radii[0] > 0).no_grad_clone(),
                 deepcopy(self.pose_graph),
             )
         )
@@ -474,7 +480,7 @@ class Backend(torch.multiprocessing.Process):
         for optimizer in self.splat_optimizers.values():
             optimizer.step()
         self.pose_optimizer.step()
-        [kf.pose.normalize() for kf in self.keyframes.values()]
+        # [kf.pose.normalize() for kf in self.keyframes.values()]
 
     def initialize_optimizers(self):
         # TODO fix these LRs
@@ -589,15 +595,14 @@ class Backend(torch.multiprocessing.Process):
         self,
         kf_i: Frame,
         kf_j: Frame,
-    ):
+    ) -> tuple[bool, float]:
         intersection = torch.logical_and(kf_j.visible_gaussians, kf_i.visible_gaussians)
         oc = intersection.sum() / (
             min(
                 kf_i.visible_gaussians.sum().item(), kf_j.visible_gaussians.sum().item()
             )
         )
-        print(f'Redundancy check: {kf_i.index} {kf_j.index} {oc}')
-        return oc < self.conf.kf_oc
+        return oc.item() > self.conf.kf_oc, oc.item()
 
     @torch.no_grad()
     def add_pgo_constraints(
@@ -620,8 +625,9 @@ class Backend(torch.multiprocessing.Process):
             kf_i = self.keyframes[i]
             kf_j = self.keyframes[j]
 
-            # if self.to_remove_keyframe(kf_i, kf_j):
-            #     print(f'removing kf {i}')
+            # to_remove, oc = self.to_remove_keyframe(kf_i, kf_j)
+            # if to_remove:
+            #     print(f'removing kf {i} because oc({i},{j}) = {oc} > conf.kf_oc={self.conf.kf_oc}')
             #     self.keyframes.pop(i, None)
             #     remove_keyframe(self.pose_graph, i)
             #     continue
@@ -632,6 +638,10 @@ class Backend(torch.multiprocessing.Process):
                 print(f'Found loop closure! {i, j}')
                 add_constraint(self.pose_graph, i, j)
 
+        for kf in self.keyframes.values():
+            kf.visible_gaussians = None
+
+    @torch.no_grad()
     def to_insert_keyframe(
         self,
         previous_keyframe: Frame,
@@ -652,14 +662,27 @@ class Backend(torch.multiprocessing.Process):
         new_frame.visible_gaussians = outputs.radii[0] > 0
         previous_keyframe.visible_gaussians = outputs.radii[1] > 0
 
-        intersection = torch.logical_and(
-            new_frame.visible_gaussians, previous_keyframe.visible_gaussians
+        intersection = (
+            torch.logical_and(
+                new_frame.visible_gaussians, previous_keyframe.visible_gaussians
+            )
+            .sum()
+            .detach()
+            .item()
         )
-        union = torch.logical_or(
-            new_frame.visible_gaussians, previous_keyframe.visible_gaussians
+        union = (
+            torch.logical_or(
+                new_frame.visible_gaussians, previous_keyframe.visible_gaussians
+            )
+            .sum()
+            .detach()
+            .item()
         )
 
-        iou = intersection.sum() / union.sum()
+        new_frame.visible_gaussians = None
+        previous_keyframe.visible_gaussians = None
+
+        iou = intersection / union
         if iou < self.conf.kf_cov:
             return True
         pose_difference = torch.linalg.inv(new_frame.pose()) @ previous_keyframe.pose()
@@ -707,12 +730,13 @@ class Backend(torch.multiprocessing.Process):
                         self.pause_map_optim = False
                         with self.splats_mutex:
                             self.add_keyframe(frame)
-                        self.sync()
+                            self.optimize_map(1, prune=True, regularize=False)
                         if self.conf.enable_pgo:
                             with self.splats_mutex:
                                 self.add_pgo_constraints()
                     if frame.index % 5 == 0:
-                        self.sync()
+                        with self.splats_mutex:
+                            self.sync()
                 case [FrontendMessage.REQUEST_INIT, frame]:
                     frame = deepcopy(frame)
                     self.pause_map_optim = False
@@ -720,7 +744,7 @@ class Backend(torch.multiprocessing.Process):
                     with self.splats_mutex:
                         self.optimize_map(
                             self.conf.num_iters_initialization,
-                            prune=False,
+                            prune=True,
                             regularize=False,
                         )
                     self.sync()

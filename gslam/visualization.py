@@ -15,6 +15,8 @@ def log_frame(
     f: Frame,
     name: str = "/tracking/pose",
     outputs: RasterizationOutput = None,
+    loss: float = None,
+    tracking_time: float = None,
 ) -> None:
     q, t = f.pose.to_qt()
     q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
@@ -43,6 +45,11 @@ def log_frame(
         ),
     )
 
+    rr.log(
+        '/tracking/frame_index',
+        rr.TextDocument(f"# {f.index}", media_type=rr.MediaType.MARKDOWN),
+    )
+
     if outputs is not None and f.img is not None:
         rr.log(f"{name}/image", rr.Image(torch_to_pil(outputs.rgbs[0])).compress(90))
         rr.log(f"{name}/gt_image", rr.Image(torch_to_pil(f.img)).compress(90))
@@ -55,8 +62,8 @@ def log_frame(
         rr.log(f"{name}/uncertainty", rr.Image(betas).compress(70))
 
         depths = outputs.depthmaps[0]
-        depths_min = depths[outputs.betas[0] < 2.0].min().item()
-        depths_max = depths[outputs.betas[0] < 2.0].max().item()
+        depths_min = depths[outputs.alphas[0, ..., 0] > 0.9].min().item()
+        depths_max = depths[outputs.alphas[0, ..., 0] > 0.9].max().item()
         depths = false_colormap(outputs.depthmaps[0], near=depths_min, far=depths_max)
         rr.log(f"{name}/depth", rr.Image(depths).compress(70))
 
@@ -65,6 +72,13 @@ def log_frame(
 
         betas = false_colormap(outputs.betas[0].log())
         rr.log(f"{name}/uncertainty", rr.Image(betas).compress(70))
+
+    if loss is not None:
+        rr.log('/tracking/loss', rr.Scalar(loss))
+
+    if tracking_time is not None:
+        tracking_time = min(30.0, tracking_time)
+        rr.log('/tracking/fps', rr.Scalar(1.0 / tracking_time))
 
 
 def get_blueprint() -> rrb.Blueprint:

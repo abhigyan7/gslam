@@ -42,6 +42,11 @@ class GaussianSplattingData(torch.nn.Module):
         )
         self.ages: torch.nn.Parameter = torch.nn.Parameter(ages, requires_grad=False)
 
+        self.register_buffer(
+            'background',
+            torch.tensor([0.0, 0.0, 0.0], device=self.means.device).float(),
+        )
+
     def forward(
         self,
         cameras: List[Camera],
@@ -68,10 +73,7 @@ class GaussianSplattingData(torch.nn.Module):
             packed=False,
             log_uncertainties=self.log_uncertainties,
             visibility_min_T=visibility_min_T,
-            backgrounds=torch.Tensor([0.0, 0.0, 0.0])
-            .tile([len(cameras), 1])
-            .float()
-            .to(self.means.device),
+            backgrounds=self.background.tile([len(cameras), 1]),
         )
 
     @staticmethod
@@ -96,6 +98,31 @@ class GaussianSplattingData(torch.nn.Module):
             self.log_uncertainties.clone().detach(),
             self.ages.clone(),
         )
+
+    def mask(self, m) -> Self:
+        return GaussianSplattingData(
+            self.means[m, :],
+            self.quats[m, :],
+            self.scales[m, :],
+            self.opacities[m],
+            self.colors[m, :],
+            self.log_uncertainties[m],
+            self.ages[m],
+        )
+
+    def no_grad_clone(self) -> Self:
+        ret = GaussianSplattingData(
+            self.means.clone().detach(),
+            self.quats.clone().detach(),
+            self.scales.clone().detach(),
+            self.opacities.clone().detach(),
+            self.colors.clone().detach(),
+            self.log_uncertainties.clone().detach(),
+            self.ages.clone(),
+        )
+
+        [ret.__getattr__(p).requires_grad_(False) for p in self._per_splat_params]
+        return ret
 
     def as_dict(self):
         return torch.nn.ParameterDict(
