@@ -16,7 +16,7 @@ def log_frame(
     name: str = "/tracking/pose",
     outputs: RasterizationOutput = None,
     loss: float = None,
-    tracking_time: float = None,
+    tracking_time: float = -1,
 ) -> None:
     q, t = f.pose.to_qt()
     q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
@@ -76,7 +76,7 @@ def log_frame(
     if loss is not None:
         rr.log('/tracking/loss', rr.Scalar(loss))
 
-    if tracking_time is not None:
+    if tracking_time > 0:
         tracking_time = min(30.0, tracking_time)
         rr.log('/tracking/fps', rr.Scalar(1.0 / tracking_time))
 
@@ -84,10 +84,16 @@ def log_frame(
 def get_blueprint() -> rrb.Blueprint:
     blueprint = rrb.Horizontal(
         rrb.Vertical(
-            rrb.Spatial3DView(
-                name='3D',
-                origin='/tracking',
-                contents=["$origin/**", "- /tracking/pc", "- /tracking/kf/**"],
+            rrb.Horizontal(
+                rrb.Spatial3DView(
+                    name='3D',
+                    origin='/tracking',
+                    contents=["$origin/**", "- /tracking/pc", "- /tracking/kf/**"],
+                ),
+                rrb.Spatial2DView(
+                    name='3D',
+                    origin='/tracking/flow',
+                ),
             ),
             rrb.Horizontal(
                 rrb.TimeSeriesView(name='tracking loss', origin="/tracking/loss"),
@@ -101,7 +107,11 @@ def get_blueprint() -> rrb.Blueprint:
         ),
         rrb.Vertical(
             rrb.Horizontal(
-                rrb.Spatial2DView(name="render", origin="/tracking/pose/image"),
+                rrb.Spatial2DView(
+                    name="render",
+                    origin="/tracking/pose/image",
+                    contents=["$origin/**", "- $origin/depth"],
+                ),
                 rrb.Spatial2DView(name="gt image", origin="/tracking/pose/gt_image"),
             ),
             rrb.Horizontal(

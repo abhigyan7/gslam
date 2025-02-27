@@ -21,7 +21,7 @@ from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .pose_graph import add_constraint
-from .primitives import Frame, PoseZhou as Pose, Camera
+from .primitives import Frame, Pose, Camera
 from .pruning import (
     PruneLowOpacity,
     PruneLargeGaussians,
@@ -68,7 +68,7 @@ class MapConfig:
     optim_window_random_keyframes: int = 2
 
     num_iters_mapping: int = 15
-    num_iters_initialization: int = 110
+    num_iters_initialization: int = 20
 
     opacity_pruning_threshold: float = 0.2
     size_pruning_threshold: int = 256
@@ -242,7 +242,7 @@ class Backend(torch.multiprocessing.Process):
 
         early_stopper = StopOnPlateau(3, 0.012)
 
-        for step in (pbar := tqdm.trange(n_iters)):
+        for step in (pbar := tqdm.trange(n_iters, disable=True)):
             self.total_step += 1
             window = self.optimization_window()
             cameras = [x.camera for x in window]
@@ -388,7 +388,8 @@ class Backend(torch.multiprocessing.Process):
         outputs = self.splats(
             [last_kf.camera],
             [last_kf.pose],
-            True,
+            render_depth=True,
+            render_depth_variance=True,
         )
 
         # last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
@@ -457,6 +458,7 @@ class Backend(torch.multiprocessing.Process):
                 # deepcopy(self.splats),
                 self.splats.mask(self.last_outputs.radii[0] > 0).no_grad_clone(),
                 deepcopy(self.pose_graph),
+                self.last_outputs.depthmap_variances,
             )
         )
         return

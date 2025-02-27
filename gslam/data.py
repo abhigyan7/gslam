@@ -9,7 +9,7 @@ from torch.multiprocessing import JoinableQueue, Process
 from threading import Event
 import cv2
 
-from .primitives import Camera, Frame, PoseZhou as Pose
+from .primitives import Camera, Frame, Pose
 
 
 tum_intrinsics_params = {

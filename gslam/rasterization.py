@@ -39,6 +39,7 @@ class RasterizationOutput:
     conics: torch.Tensor = None
     opacities: torch.Tensor = None
     n_touched: torch.Tensor = None
+    depthmap_variances: torch.Tensor = None
 
 
 def rasterization(
@@ -68,6 +69,7 @@ def rasterization(
     log_uncertainties: Optional[Tensor] = None,
     visibility_min_T: float = 0.5,
     mask: Optional[Tensor] = None,
+    render_depth_variance: bool = False,
 ) -> RasterizationOutput:
     """Rasterize a set of 3D Gaussians (N) to a batch of image planes (C).
 
@@ -113,6 +115,7 @@ def rasterization(
             `scales` will be ignored. [N, 3, 3], Default is None.
         log_uncertainties: Optional confidences (betas) for the Gaussians. [N,].
         mask: Optional boolean mask over Gaussians. [N,].
+        render_depth_variance: Whether to render the depth variance (we follow Active-GS)
 
     Returns:
         RasterizationOutput
@@ -237,6 +240,7 @@ def rasterization(
                 [backgrounds, torch.zeros(C, 1, device=backgrounds.device)], dim=-1
             )
         depth_index = colors.shape[-1] - 1
+
     elif render_mode in ["D", "ED"]:
         colors = depths[..., None]
         if backgrounds is not None:
@@ -249,10 +253,23 @@ def rasterization(
         colors = torch.cat((colors, betas[..., None]), dim=-1)
         if backgrounds is not None:
             backgrounds = torch.cat(
-                [backgrounds, torch.full((C, 1), 1.0, device=backgrounds.device).exp()],
+                [backgrounds, torch.ones((C, 1), device=backgrounds.device).exp()],
                 dim=-1,
             )
         betas_index = colors.shape[-1] - 1
+
+    if render_depth_variance:
+        colors = torch.cat(
+            (colors, depths[..., None].square(), torch.ones_like(depths[..., None])),
+            dim=-1,
+        )
+        if backgrounds is not None:
+            backgrounds = torch.cat(
+                [backgrounds, torch.zeros((C, 2), device=backgrounds.device)],
+                dim=-1,
+            )
+        depth_square_index = colors.shape[-1] - 2
+        ones_index = colors.shape[-1] - 1
 
     # Identify intersecting tiles
     tile_width = math.ceil(width / float(tile_size))
@@ -286,56 +303,21 @@ def rasterization(
             "n_cameras": C,
         }
     )
-
-    # print("rank", world_rank, "Before rasterize_to_pixels")
-    if colors.shape[-1] > channel_chunk:
-        # slice into chunks
-        n_chunks = (colors.shape[-1] + channel_chunk - 1) // channel_chunk
-        render_colors, render_alphas, n_toucheds = [], [], []
-        for i in range(n_chunks):
-            colors_chunk = colors[..., i * channel_chunk : (i + 1) * channel_chunk]
-            backgrounds_chunk = (
-                backgrounds[..., i * channel_chunk : (i + 1) * channel_chunk]
-                if backgrounds is not None
-                else None
-            )
-            render_colors_, render_alphas_, n_touched = rasterize_to_pixels(
-                means2d,
-                conics,
-                colors_chunk,
-                opacities,
-                width,
-                height,
-                tile_size,
-                isect_offsets,
-                flatten_ids,
-                backgrounds=backgrounds_chunk,
-                packed=packed,
-                absgrad=absgrad,
-                visibility_min_T=visibility_min_T,
-            )
-            render_colors.append(render_colors_)
-            render_alphas.append(render_alphas_)
-            n_toucheds.append(n_touched)
-        render_colors = torch.cat(render_colors, dim=-1)
-        render_alphas = render_alphas[0]  # discard the rest
-        n_touched = torch.cat(n_touched, dim=-1)
-    else:
-        render_colors, render_alphas, n_touched = rasterize_to_pixels(
-            means2d,
-            conics,
-            colors,
-            opacities,
-            width,
-            height,
-            tile_size,
-            isect_offsets,
-            flatten_ids,
-            backgrounds=backgrounds,
-            packed=packed,
-            absgrad=absgrad,
-            visibility_min_T=visibility_min_T,
-        )
+    render_colors, render_alphas, n_touched = rasterize_to_pixels(
+        means2d,
+        conics,
+        colors,
+        opacities,
+        width,
+        height,
+        tile_size,
+        isect_offsets,
+        flatten_ids,
+        backgrounds=backgrounds,
+        packed=packed,
+        absgrad=absgrad,
+        visibility_min_T=visibility_min_T,
+    )
     if render_mode in ["ED", "RGB+ED", "D", "RGB+D"]:
         meta['depthmaps'] = render_colors[..., depth_index]
     if render_mode in ["ED", "RGB+ED", "ED"]:
@@ -344,14 +326,21 @@ def rasterization(
     if log_uncertainties is not None:
         meta['betas'] = render_colors[..., betas_index]
     if render_mode not in ['D', 'ED']:
-        render_colors = render_colors[..., :3]
+        render_rgbs = render_colors[..., :3]
     else:
-        render_colors = None
+        render_rgbs = None
+    if render_depth_variance:
+        with torch.no_grad():
+            depthmap_square = render_colors[..., depth_square_index]
+            ones = render_colors[..., ones_index]
+            meta['depthmap_variances'] = depthmap_square + meta[
+                'depthmaps'
+            ].square() * (ones - 2.0)
 
     meta['n_touched'] = n_touched.long()
 
     ret = RasterizationOutput(
-        rgbs=render_colors,
+        rgbs=render_rgbs,
         alphas=render_alphas,
         **meta,
     )
