@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from typing import Literal
+
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
@@ -17,6 +19,7 @@ def log_frame(
     outputs: RasterizationOutput = None,
     loss: float = None,
     tracking_time: float = -1,
+    is_keyframe: bool = False,
 ) -> None:
     q, t = f.pose.to_qt()
     q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
@@ -45,10 +48,11 @@ def log_frame(
         ),
     )
 
-    rr.log(
-        '/tracking/frame_index',
-        rr.TextDocument(f"# {f.index}", media_type=rr.MediaType.MARKDOWN),
-    )
+    if not is_keyframe:
+        rr.log(
+            '/tracking/frame_index',
+            rr.TextDocument(f"# {f.index}", media_type=rr.MediaType.MARKDOWN),
+        )
 
     if outputs is not None and f.img is not None:
         rr.log(f"{name}/image", rr.Image(torch_to_pil(outputs.rgbs[0])).compress(90))
@@ -81,7 +85,7 @@ def log_frame(
         rr.log('/tracking/fps', rr.Scalar(1.0 / tracking_time))
 
 
-def get_blueprint() -> rrb.Blueprint:
+def get_blueprint(method: Literal['warp', 'igs', 'flow']) -> rrb.Blueprint:
     blueprint = rrb.Horizontal(
         rrb.Vertical(
             rrb.Horizontal(
@@ -93,6 +97,7 @@ def get_blueprint() -> rrb.Blueprint:
                 rrb.Spatial2DView(
                     name='3D',
                     origin='/tracking/flow',
+                    visible=method == 'flow',
                 ),
             ),
             rrb.Horizontal(

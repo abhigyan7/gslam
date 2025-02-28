@@ -19,7 +19,7 @@ import numpy as np
 
 from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
 from .map import GaussianSplattingData
-from .messages import BackendMessage, FrontendMessage
+from .messages import BackendMessage, FrontendMessage, InitializationType
 from .pose_graph import add_constraint
 from .primitives import Frame, Pose, Camera
 from .pruning import (
@@ -395,8 +395,6 @@ class Backend(torch.multiprocessing.Process):
         # last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
         last_kf.visible_gaussians = outputs.radii.sum(dim=0) > 0
         self.last_outputs = outputs
-        self.last_kf_depthmap = outputs.depthmaps[0]
-        self.last_kf_rgbs = outputs.rgbs[0]
 
         return
 
@@ -453,12 +451,11 @@ class Backend(torch.multiprocessing.Process):
             (
                 BackendMessage.SYNC,
                 deepcopy(self.keyframes),
-                self.last_kf_depthmap.detach(),
-                self.last_kf_rgbs.detach(),
-                # deepcopy(self.splats),
+                self.last_outputs.depthmaps[0].detach(),
+                self.last_outputs.rgbs[0].detach(),
                 self.splats.mask(self.last_outputs.radii[0] > 0).no_grad_clone(),
                 deepcopy(self.pose_graph),
-                self.last_outputs.depthmap_variances,
+                self.last_outputs.depthmap_variances[0].detach(),
             )
         )
         return
@@ -485,7 +482,6 @@ class Backend(torch.multiprocessing.Process):
         # [kf.pose.normalize() for kf in self.keyframes.values()]
 
     def initialize_optimizers(self):
-        # TODO fix these LRs
         self.splat_optimizers: Dict[str, torch.optim.Optimizer] = {}
         self.splat_optimizers['means'] = torch.optim.Adam(
             params=[self.splats.means],
@@ -523,9 +519,9 @@ class Backend(torch.multiprocessing.Process):
         self.initialize_optimizers()
 
         H, W, _ = frame.img.shape
-        mock_depth_map = torch.ones((1, H, W), device=self.conf.device)
-        mock_depth_map = mock_depth_map + (torch.randn_like(mock_depth_map) - 0.5) * 0.3
-        mock_depth_map *= self.conf.initial_scale
+        mock_depth_map = torch.full(
+            (1, H, W), self.conf.initial_scale, device=self.conf.device
+        )
         mock_alphas = torch.ones((1, H, W, 1), device=self.conf.device) * 0.01
 
         mock_outputs = RasterizationOutput(None, mock_alphas, mock_depth_map)
@@ -729,6 +725,7 @@ class Backend(torch.multiprocessing.Process):
                         continue
                     last_keyframe = self.keyframes[sorted(self.keyframes.keys())[-1]]
                     if self.to_insert_keyframe(last_keyframe, frame):
+                        print(f'Keyframe no. {len(self.keyframes)+1} is {frame.index}')
                         self.pause_map_optim = False
                         with self.splats_mutex:
                             self.add_keyframe(frame)
@@ -739,13 +736,18 @@ class Backend(torch.multiprocessing.Process):
                     if frame.index % 5 == 0:
                         with self.splats_mutex:
                             self.sync()
-                case [FrontendMessage.REQUEST_INIT, frame]:
+                case [FrontendMessage.REQUEST_INIT, frame, initialization_type]:
                     frame = deepcopy(frame)
                     self.pause_map_optim = False
                     self.initialize(frame)
+                    num_iters_init = (
+                        1
+                        if initialization_type == InitializationType.WEAK_INIT
+                        else self.conf.num_iters_initialization
+                    )
                     with self.splats_mutex:
                         self.optimize_map(
-                            self.conf.num_iters_initialization,
+                            num_iters_init,
                             prune=True,
                             regularize=False,
                         )

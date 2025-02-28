@@ -320,9 +320,9 @@ def rasterization(
     )
     if render_mode in ["ED", "RGB+ED", "D", "RGB+D"]:
         meta['depthmaps'] = render_colors[..., depth_index]
-    if render_mode in ["ED", "RGB+ED", "ED"]:
+    if render_mode in ["ED", "RGB+ED"]:
         # normalize the accumulated depth to get the expected depth
-        meta['depthmaps'] = (meta['depthaps'] / render_alphas.clamp(min=1e-10),)
+        meta['depthmaps'] = meta['depthmaps'] / render_alphas[..., 0].clamp(min=1e-10)
     if log_uncertainties is not None:
         meta['betas'] = render_colors[..., betas_index]
     if render_mode not in ['D', 'ED']:
@@ -331,9 +331,9 @@ def rasterization(
         render_rgbs = None
     if render_depth_variance:
         with torch.no_grad():
-            depthmap_square = render_colors[..., depth_square_index]
+            depth_square_map = render_colors[..., depth_square_index]
             ones = render_colors[..., ones_index]
-            meta['depthmap_variances'] = depthmap_square + meta[
+            meta['depthmap_variances'] = depth_square_map + meta[
                 'depthmaps'
             ].square() * (ones - 2.0)
 

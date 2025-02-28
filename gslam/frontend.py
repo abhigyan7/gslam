@@ -32,7 +32,7 @@ from pypose.optim.corrector import FastTriggs
 from pypose.optim.scheduler import StopOnPlateau
 
 from .map import GaussianSplattingData
-from .messages import BackendMessage, FrontendMessage
+from .messages import BackendMessage, FrontendMessage, InitializationType
 from .primitives import Frame, Pose, matrix_to_quaternion
 from .rasterization import RasterizationOutput
 from .trajectory import evaluate_trajectories
@@ -53,7 +53,8 @@ class TrackingConfig:
     pose_optim_lr: float = 0.002
     pose_optim_lr_decay: float = 0.99
 
-    method: Literal['igs', 'warp', 'flow'] = 'igs'
+    method: Literal['igs', 'warp', 'flow'] = 'flow'
+    flow_tracking_device: str = 'cpu'
 
     pose_regularization: float = 0
 
@@ -64,9 +65,10 @@ class LocalBundleAdjustment(torch.nn.Module):
         self.register_buffer("K", K)
         self.register_buffer("pts1", pts1)  # N x 2, uv coordinate
         self.register_buffer("pts2", pts2)  # N x 2, uv coordinate
+        self.register_buffer("depth", depth)
 
         self.T = pp.Parameter(init_T)
-        self.depth = torch.nn.Parameter(depth)
+        # self.depth = torch.nn.Parameter(depth)
 
     def forward(self) -> torch.Tensor:
         pts3d = pixel2point(self.pts1, self.depth, self.K)
@@ -155,52 +157,42 @@ class Frontend(mp.Process):
         return
 
     def request_initialization(self, f: Frame):
-        self.map_queue.put((FrontendMessage.REQUEST_INIT, deepcopy(f)))
+        initialization_type = (
+            InitializationType.STRONG_INIT
+            if self.conf.method == 'igs'
+            else InitializationType.WEAK_INIT
+        )
+        self.map_queue.put(
+            (FrontendMessage.REQUEST_INIT, deepcopy(f), initialization_type)
+        )
         self.waiting_for_sync = True
 
     def track(self, new_frame: Frame):
+        n_iters = self.conf.num_tracking_iters
+
         if len(self.frames) == 0:
             self.initialize(new_frame)
             n_iters = 0
         elif len(self.frames) == 1:
             pose = self.frames[-1].pose()
-            new_frame.pose = Pose(pose.detach()).to(self.conf.device)
-            optimizer = torch.optim.Adam(
-                [
-                    {
-                        'params': new_frame.pose.parameters(),
-                        'lr': self.conf.pose_optim_lr,
-                    }
-                ]
-            )
-
-            scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                optimizer, self.conf.pose_optim_lr_decay
-            )
-            n_iters = self.conf.num_tracking_iters
         else:
             # constant motion model
             pose_a = self.frames[-2].pose()
             pose_b = self.frames[-1].pose()
-            pose_c = pose_b @ torch.linalg.inv(pose_a) @ pose_b
-            new_frame.pose = Pose(pose_c.detach()).to(self.conf.device)
-            optimizer = torch.optim.Adam(
-                [
-                    {
-                        'params': new_frame.pose.parameters(),
-                        'lr': self.conf.pose_optim_lr,
-                    }
-                ]
-            )
+            pose = pose_b @ torch.linalg.inv(pose_a) @ pose_b
 
-            scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                optimizer, self.conf.pose_optim_lr_decay
-            )
-            n_iters = self.conf.num_tracking_iters
+        if n_iters > 0:
+            new_frame.pose = Pose(pose.detach()).to(self.conf.device)
+            if self.conf.method in ['warp', 'igs']:
+                optimizer = torch.optim.Adam(
+                    new_frame.pose.parameters(),
+                    self.conf.pose_optim_lr,
+                )
+                scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                    optimizer, self.conf.pose_optim_lr_decay
+                )
 
-        outputs = None
         start_time = time.time()
-
         loss = 0
         if n_iters > 0:
             if self.conf.method == 'warp':
@@ -235,9 +227,7 @@ class Frontend(mp.Process):
             },
         )
         self.frames.append(new_frame.strip())
-
         self.add_frame_to_backend(new_frame)
-
         return new_frame.pose()
 
     def add_frame_to_backend(self, new_frame: Frame):
@@ -274,7 +264,7 @@ class Frontend(mp.Process):
             )
 
         for kf in self.keyframes.values():
-            log_frame(kf, name=f'/tracking/kf/{kf.index}')
+            log_frame(kf, name=f'/tracking/kf/{kf.index}', is_keyframe=True)
         line_strips = []
         for kf_i in self.pose_graph:
             for kf_j in self.pose_graph[kf_i]:
@@ -294,6 +284,7 @@ class Frontend(mp.Process):
             self.dump_pointcloud()
             self.last_time_we_sent_splats_to_rerun = self.frames[-1].index
 
+        print('synced')
         return
 
     def sync_at_end(self, splats: GaussianSplattingData, keyframes: dict[int, Frame]):
@@ -517,9 +508,7 @@ class Frontend(mp.Process):
         rr.init('gslam', recording_id=f'gslam_1_{int(time.time()) % 10000}', spawn=True)
         # rr.save(self.output_dir / 'rr-fe.rrd')
         rr.log("/tracking", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
-        rr.send_blueprint(get_blueprint())
-
-        self.warp = None
+        rr.send_blueprint(get_blueprint(self.conf.method))
 
         self.waiting_for_end_sync = False
         self.waiting_for_sync = False
@@ -530,8 +519,6 @@ class Frontend(mp.Process):
         self.done = False
 
         if self.conf.method == 'flow':
-            import cv2
-
             self.klt_feature_params = dict(
                 maxCorners=500, qualityLevel=0.1, minDistance=7, blockSize=3
             )
@@ -569,7 +556,7 @@ class Frontend(mp.Process):
                     continue
 
                 frame = frame.to(self.conf.device)
-                if self.warp is None:
+                if self.warp is None and self.conf.method == 'warp':
                     self.warp = Warp(
                         frame.camera.intrinsics, frame.camera.height, frame.camera.width
                     )
@@ -697,7 +684,7 @@ class Frontend(mp.Process):
         return _loss
 
     def flow_track(self, new_frame: Frame):
-        device = 'cpu'
+        device = self.conf.flow_tracking_device
 
         new_frame_np = np.uint8(new_frame.img.detach().cpu().numpy() * 255.0)
         new_gray = cv2.cvtColor(new_frame_np, cv2.COLOR_RGB2GRAY)
@@ -708,12 +695,16 @@ class Frontend(mp.Process):
             None,
             **self.lk_params,
         )
+
         good_old = self.flow_points[st == 1]
         good_new = p1[st == 1]
         err = err[st == 1]
 
         good_old_indices = np.roll(np.int32(good_old), 1, 1)
         depths = self.reference_depthmap.cpu().numpy()[
+            good_old_indices[..., 0], good_old_indices[..., 1]
+        ]
+        depth_variances = self.reference_depthmap_variances.cpu().numpy()[
             good_old_indices[..., 0], good_old_indices[..., 1]
         ]
 
@@ -727,29 +718,25 @@ class Frontend(mp.Process):
         good_old = good_old[keep_mask]
         good_new = good_new[keep_mask]
         depths = depths[keep_mask]
+        depth_variances = depth_variances[keep_mask]
         err = err[keep_mask]
-
-        # fpdb.set_trace()
 
         self.flow_points = np.roll(good_old, 1, 1).reshape(-1, 1, 2)
 
         frame = new_frame_np.copy()
-        for i, (new, old) in enumerate(zip(good_new, good_old)):
-            b, a = new.astype(np.int32).ravel()
-            d, c = old.astype(np.int32).ravel()
-            frame = cv2.line(frame, (a, b), (c, d), self.colors[i].tolist(), 2)
-            frame = cv2.circle(frame, (c, d), 5, self.colors[i].tolist(), -1)
-        rr.log('/tracking/flow', rr.Image(frame).compress(90))
-
         K = new_frame.camera.intrinsics
-        # init_T = pp.mat2SE3(self.reference_frame.pose()).to(device).requires_grad_(True)
         # init from keyframe pose. we'll have to do the constant vel thing maybe.
         init_T = pp.identity_SE3(requires_grad=True, device=device)
+        # init_T = pp.mat2SE3(self.frames[-1].pose()@self.reference_frame.pose().inverse()).to(device).requires_grad_(True)
+        depths = torch.from_numpy(depths).to(device)
+        depth_variances = torch.from_numpy(depth_variances).to(device)
+        pts1 = torch.from_numpy(good_old)
+        pts2 = torch.from_numpy(good_new)
         graph = LocalBundleAdjustment(
-            K,
-            torch.from_numpy(good_old),
-            torch.from_numpy(good_new),
-            torch.from_numpy(depths),
+            K.to(device),
+            pts1,
+            pts2,
+            depths,
             init_T,
         ).to(device)
 
@@ -770,7 +757,7 @@ class Frontend(mp.Process):
         optimizer = LM(
             graph,
             solver=Cholesky(),
-            strategy=TrustRegion(radius=1e3),
+            strategy=TrustRegion(radius=1e2),
             kernel=kernel,
             corrector=corrector,
             min=1e-3,
@@ -779,19 +766,68 @@ class Frontend(mp.Process):
         )
 
         scheduler = StopOnPlateau(
-            optimizer, steps=100, patience=100, decreasing=1e-3, verbose=False
+            optimizer,
+            steps=100,
+            patience=4,
+            decreasing=1e-2,
+            verbose=False,
         )
 
-        pbar = tqdm.tqdm(desc=f'Tracking frame {new_frame.index}')
+        K = new_frame.camera.intrinsics.to(device)
+        N_pts = graph.pts1.shape[0]
+        point_variance = 3.0
+
         while scheduler.continual():
-            loss = optimizer.step(input=())
+            with torch.no_grad():
+                t = graph.T.tensor().view(7)[:3]
+                J_p = torch.zeros((N_pts, 2, 1), device=device)
+                J_p[..., 0, 0] = depths / (depths + t[2])
+                J_p[..., 1, 0] = depths / (depths + t[2])
+                J_p_J_p_T = torch.bmm(J_p, J_p.permute(0, 2, 1))
+                eye = torch.eye(2, device=device).unsqueeze(0)
+
+                # account for flow error in both images
+                weight_p = (J_p_J_p_T + eye) * point_variance
+
+                J_d = torch.zeros((N_pts, 2, 1), device=device)
+                J_d[..., 0, 0] = (pts1[..., 0] - K[0, 2]) * t[2] - K[0, 0] * t[0]
+                J_d[..., 1, 0] = (pts1[..., 1] - K[0, 2]) * t[2] - K[1, 1] * t[1]
+                weight_d = depth_variances.unsqueeze(-1).unsqueeze(-1) * torch.bmm(
+                    J_d, J_d.permute(0, 2, 1)
+                )
+                weight_d.mul_((depths + t[2]).pow(-4.0).unsqueeze(-1).unsqueeze(-1))
+
+                # weight is a Nx2x2 tensor (2x2 Block diagonals in R^{2Nx2N})
+                weight = weight_d + weight_p
+                # weight = weight.inverse()
+
+            loss = optimizer.step(input=(), weight=weight)
             scheduler.step(loss)
-            pbar.update(1)
-        pbar.close()
+
+            _pts3d = pp.function.geometry.pixel2point(graph.pts1, graph.depth, graph.K)
+            _reproj_uv = pp.function.point2pixel(_pts3d, graph.K, graph.T)
+            _reproj_uv = _reproj_uv.detach().cpu()
+
+            reproj_err = (
+                torch.norm(graph.pts2 - _reproj_uv, dim=1).detach().cpu().numpy()
+            )
+
+            frame = new_frame_np.copy()
+            for i, (new, old, reproj) in enumerate(
+                zip(good_new, good_old, _reproj_uv.numpy())
+            ):
+                b, a = new.astype(np.int32).ravel()
+                # d, c = old.astype(np.int32).ravel()
+                f, e = reproj.astype(np.int32).ravel()
+                # frame = cv2.line(frame, (a, b), (c, d), (self.colors[i]//1.5).tolist(), 2)
+                frame = cv2.line(frame, (a, b), (e, f), self.colors[i].tolist(), 1)
+                frame = cv2.circle(frame, (a, b), 3, self.colors[i].tolist(), -1)
+                frame = cv2.circle(frame, (e, f), 10, self.colors[i].tolist(), 1)
+            rr.log('/tracking/flow', rr.Image(frame).compress(90))
 
         new_frame.pose = Pose(
-            initial_pose=graph.T.matrix().detach().to(self.conf.device)
-            @ self.reference_frame.pose()
+            graph.T.matrix().detach().to(self.conf.device) @ self.reference_frame.pose()
         ).to(self.conf.device)
+        rr.log('/tracking/3dpts', rr.Points3D(_pts3d))
 
-        return loss
+        return reproj_err.mean().item()
