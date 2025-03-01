@@ -103,19 +103,21 @@ def false_colormap(
 
 
 class ForkedPdb(pdb.Pdb):
-    """A Pdb subclass that may be used
-    from a forked multiprocessing child
+    """A Pdb subclass that works in multiprocessing child processes."""
 
-    from https://stackoverflow.com/a/23654936
-    """
+    def __init__(self, global_pause_event, *args, **kwargs):
+        self.global_pause_event = global_pause_event
+        super().__init__(*args, **kwargs)  # Properly initialize Pdb
 
     def interaction(self, *args, **kwargs):
         _stdin = sys.stdin
         try:
             sys.stdin = open('/dev/stdin')
+            self.global_pause_event.set()  # Signal all other processes to pause
             pdb.Pdb.interaction(self, *args, **kwargs)
         finally:
             sys.stdin = _stdin
+            self.global_pause_event.clear()  # Resume other processes after debugging
 
 
 def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:

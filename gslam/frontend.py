@@ -26,12 +26,9 @@ from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, PoseZhou as Pose, matrix_to_quaternion
 from .rasterization import RasterizationOutput
 from .trajectory import evaluate_trajectories
-from .utils import torch_image_to_np, torch_to_pil, false_colormap, ForkedPdb, unvmap
+from .utils import torch_image_to_np, torch_to_pil, false_colormap, unvmap
 from .visualization import log_frame, get_blueprint
 from .warp import Warp
-
-
-fpdb = ForkedPdb()
 
 
 @dataclass
@@ -58,6 +55,7 @@ class Frontend(mp.Process):
         frontend_done_event: Event = None,
         backend_done_event: Event = None,
         output_dir: Path = None,
+        global_pause_event: Event = None,
     ):
         super().__init__()
         self.conf: TrackingConfig = conf
@@ -80,6 +78,7 @@ class Frontend(mp.Process):
         self.sensor_queue = sensor_queue
         self.frontend_done_event = frontend_done_event
         self.backend_done_event = backend_done_event
+        self.global_pause_event = global_pause_event
 
         self.output_dir = output_dir
         os.makedirs(self.output_dir / 'final', exist_ok=True)
@@ -230,7 +229,7 @@ class Frontend(mp.Process):
             },
         ).start()
         Thread(
-            self.save_tracking_stats,
+            target=self.save_tracking_stats,
             args=(new_frame, _loss),
             kwargs={
                 "tracking_time": time.time() - start_time,
@@ -520,6 +519,10 @@ class Frontend(mp.Process):
                 continue
 
             if self.waiting_for_sync:
+                continue
+
+            if self.global_pause_event.is_set():
+                self.global_pause_event.wait()
                 continue
 
             if self.done:

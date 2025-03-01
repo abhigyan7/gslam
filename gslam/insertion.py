@@ -3,7 +3,7 @@ import math
 
 from .map import GaussianSplattingData
 from .primitives import Frame
-from .rasterization import RasterizationOutput
+from .rasterization import RasterizationOutput, get_new_splat_depth
 from .utils import knn
 from typing import Dict, List
 
@@ -105,12 +105,14 @@ class InsertFromDepthMap(InsertionStrategy):
         min_alpha_for_depth: float,
         initial_opacity: float,
         insert_in_regions_with_depth: bool = True,
+        global_pause_event=None,
     ):
         self.depth_variance = depth_variance
         self.no_depth_variance = no_depth_variance
         self.min_alpha_for_depth = min_alpha_for_depth
         self.initial_opacity = initial_opacity
         self.insert_in_regions_with_depth = insert_in_regions_with_depth
+        self.global_pause_event = global_pause_event
 
     @torch.no_grad()
     def step(
@@ -120,6 +122,7 @@ class InsertFromDepthMap(InsertionStrategy):
         rasterization_output: RasterizationOutput,
         frame: Frame,
         N: int,
+        frames: list,
     ):
         depths = rasterization_output.depthmaps[0, ...]
         alphas = rasterization_output.alphas[0, ..., 0]
@@ -229,6 +232,36 @@ class InsertFromDepthMap(InsertionStrategy):
             'log_uncertainties': torch.ones((N,), device=device),
             'ages': torch.full((N,), frame.index, device=device).long(),
         }
+
+        if len(frames) > 1:
+            Ks = torch.stack([x.camera.intrinsics for x in frames])
+            viewmats = torch.stack([x.pose() for x in frames])
+            est_depths = torch.stack([x.est_depths for x in frames])
+            height, width = frame.camera.height, frame.camera.width
+
+            camera_ids, gaussian_ids, _, means2d, depths = get_new_splat_depth(
+                new_params,
+                viewmats,
+                Ks,
+                width,
+                height,
+            )
+
+            means2d = means2d.to(int)
+            means_width = torch.clamp(means2d[:, 0], max=width - 1, min=0)
+            means_height = torch.clamp(means2d[:, 1], max=height - 1, min=0)
+            # ForkedPdb(self.global_pause_event).set_trace()
+            is_in_front = gaussian_ids[
+                depths < est_depths[camera_ids, means_height, means_width]
+            ]
+            keep_mask = torch.ones(new_params['means'].shape[0], dtype=torch.bool)
+            keep_mask[is_in_front] = False
+            num_splats = new_params['means'].shape[0]
+            for k, v in new_params.items():
+                new_params[k] = new_params[k][keep_mask]
+
+            new_num_splats = new_params['means'].shape[0]
+            print(f"Inserted {new_num_splats} splats from {num_splats} new splats")
 
         self._add_new_splats(splats, optimizers, new_params)
 
