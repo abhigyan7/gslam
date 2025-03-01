@@ -149,6 +149,7 @@ def rasterization(
         betas = torch.exp(log_uncertainties).clamp(min=0.01)
 
     # Project Gaussians to 2D. Directly pass in {quats, scales} is faster than precomputing covars.
+
     proj_results = fully_fused_projection(
         means,
         covars,
@@ -357,3 +358,91 @@ def rasterization(
     )
 
     return ret
+
+
+def get_new_splat_depth(
+    new_params: dict[str, torch.Tensor],
+    # means: Tensor,  # [N, 3]
+    # quats: Tensor,  # [N, 4]
+    # log_scales: Tensor,  # [N, 3]
+    # logit_opacities: Tensor,  # [N]
+    # logit_colors: Tensor,  # [(C,) N, D]
+    viewmats: Tensor,  # [C, 4, 4]
+    Ks: Tensor,  # [C, 3, 3]
+    width: int,
+    height: int,
+    near_plane: float = 0.01,
+    far_plane: float = 1e10,
+    radius_clip: float = 0.0,
+    eps2d: float = 0.3,
+    packed: bool = True,
+    sparse_grad: bool = False,
+    rasterize_mode: Literal["classic", "antialiased"] = "classic",
+    camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole",
+    covars: Optional[Tensor] = None,
+) -> torch.Tensor:
+    means = new_params['means']
+    quats = new_params['quats']
+    log_scales = new_params['scales']
+    scales = torch.exp(log_scales)
+
+    if packed:
+        proj_results = fully_fused_projection(
+            means,
+            covars,
+            quats,
+            scales,
+            viewmats,
+            Ks,
+            width,
+            height,
+            eps2d=eps2d,
+            packed=packed,
+            near_plane=near_plane,
+            far_plane=far_plane,
+            radius_clip=radius_clip,
+            sparse_grad=sparse_grad,
+            calc_compensations=(rasterize_mode == "antialiased"),
+            camera_model=camera_model,
+        )
+
+        (
+            camera_ids,
+            gaussian_ids,
+            radii,
+            means2d,
+            depths,
+            _,
+            _,
+        ) = proj_results
+
+        return camera_ids, gaussian_ids, radii, means2d, depths
+    else:
+        proj_results = fully_fused_projection(
+            means,
+            covars,
+            quats,
+            scales,
+            viewmats,
+            Ks,
+            width,
+            height,
+            eps2d=eps2d,
+            packed=packed,
+            near_plane=near_plane,
+            far_plane=far_plane,
+            radius_clip=radius_clip,
+            sparse_grad=sparse_grad,
+            calc_compensations=(rasterize_mode == "antialiased"),
+            camera_model=camera_model,
+        )
+
+        (
+            radii,
+            means2d,
+            depths,
+            _,
+            _,
+        ) = proj_results
+
+        return radii, means2d, depths

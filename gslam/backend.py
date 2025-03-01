@@ -29,11 +29,11 @@ from .pruning import (
     prune_using_mask,
 )
 from .rasterization import RasterizationOutput
-from .utils import create_batch, ForkedPdb, StopOnPlateau
+from .utils import create_batch, StopOnPlateau
+
+# from .utils import create_batch,  StopOnPlateau
 from .viewer import Viewer
 from .warp import Warp
-
-forked_pdb = ForkedPdb()
 
 
 @dataclass
@@ -144,6 +144,7 @@ class Backend(torch.multiprocessing.Process):
         queue: torch.multiprocessing.Queue,
         frontend_queue: torch.multiprocessing.Queue,
         backend_done_event: threading.Event,
+        global_pause_event: threading.Event,
         enable_viser_server: bool = False,
     ):
         super().__init__()
@@ -154,6 +155,8 @@ class Backend(torch.multiprocessing.Process):
         self.logger.setLevel("DEBUG")
         self.keyframes: dict[int, Frame] = dict()
         self.backend_done_event = backend_done_event
+        self.global_pause_event = global_pause_event
+
         self.splats = GaussianSplattingData.empty()
         self.pruning_opacity = PruneLowOpacity(self.conf.opacity_pruning_threshold)
         self.pruning_size = PruneLargeGaussians(self.conf.size_pruning_threshold)
@@ -163,6 +166,7 @@ class Backend(torch.multiprocessing.Process):
             0.1,
             self.conf.initial_opacity,
             False,  # TODO parameterize this
+            global_pause_event=self.global_pause_event,
         )
         self.insertion_3dgs = InsertUsingImagePlaneGradients(
             0.0002,
@@ -354,6 +358,9 @@ class Backend(torch.multiprocessing.Process):
                     self.conf.opacity_decay
                 )
 
+        for f, d in zip(window, outputs.depthmaps):
+            f.est_depths = d.detach().clone()
+
         gaussians_max_screen_size = torch.max(outputs.radii, axis=0).values
 
         remove_mask = torch.zeros(
@@ -534,6 +541,7 @@ class Backend(torch.multiprocessing.Process):
             mock_outputs,
             frame,
             5000,
+            frames=list(self.keyframes.values()),
         )
 
         return
@@ -552,6 +560,7 @@ class Backend(torch.multiprocessing.Process):
             outputs,
             frame,
             N=100,
+            frames=list(self.keyframes.values()),
         )
 
         new_frame = Frame(

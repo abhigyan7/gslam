@@ -30,6 +30,7 @@ def main(conf: PipelineConfig):
 
     frontend_done_event = mp.Event()
     backend_done_event = mp.Event()
+    global_pause_event = mp.Event()
 
     sensor_stream_process = RGBSensorStream(
         tum_dataset, dataset_queue, frontend_done_event
@@ -53,6 +54,7 @@ def main(conf: PipelineConfig):
         frontend_done_event,
         backend_done_event,
         output_dir,
+        global_pause_event,
     )
 
     backend_process = Backend(
@@ -60,6 +62,7 @@ def main(conf: PipelineConfig):
         frontend_to_backend_queue,
         backend_to_frontend_queue,
         backend_done_event,
+        global_pause_event,
     )
 
     sensor_stream_process.start()
