@@ -2,7 +2,7 @@ from torch import multiprocessing as mp
 import tyro
 
 from gslam.backend import Backend, MapConfig
-from gslam.data import RGBSensorStream, TumRGB
+from gslam.data import RGBSensorStream, TumRGB, Replica
 from gslam.frontend import Frontend, TrackingConfig
 
 from dataclasses import dataclass, field
@@ -10,6 +10,8 @@ from datetime import datetime
 import os
 from pathlib import Path
 import sys
+
+from typing import Literal
 
 
 @dataclass
@@ -19,10 +21,14 @@ class PipelineConfig:
     t: TrackingConfig = field(default_factory=lambda: TrackingConfig())
     seq_len: int = -1
     run_name: str = ''
+    dataset: Literal["tum", "replica"] = "tum"
 
 
 def main(conf: PipelineConfig):
-    tum_dataset = TumRGB(conf.scene, conf.seq_len)
+    if conf.dataset == "tum":
+        dataset = TumRGB(conf.scene, conf.seq_len)
+    elif conf.dataset == "replica":
+        dataset = Replica(conf.scene, conf.seq_len)
 
     dataset_queue = mp.Queue()
     frontend_to_backend_queue = mp.Queue()
@@ -32,9 +38,7 @@ def main(conf: PipelineConfig):
     backend_done_event = mp.Event()
     global_pause_event = mp.Event()
 
-    sensor_stream_process = RGBSensorStream(
-        tum_dataset, dataset_queue, frontend_done_event
-    )
+    sensor_stream_process = RGBSensorStream(dataset, dataset_queue, frontend_done_event)
 
     runs_dir = Path('runs')
     run_name = conf.run_name

@@ -11,6 +11,7 @@ import cv2
 
 from .primitives import Camera, Frame, PoseZhou as Pose
 
+import os
 
 tum_intrinsics_params = {
     "freiburg1": [517.3, 516.5, 318.6, 255.3, 0.2624, -0.9531, -0.0054, 0.0026, 1.1633],
@@ -159,6 +160,70 @@ class TumRGB:
             gt_pose,
             gt_depth=depth_image,
             img_file=gt_img_save_path,
+            index=idx,
+        )
+        return frame
+
+
+class Replica:
+    def __init__(self, sequence_dir: Path, seq_len: int = -1):
+        self.sequence_dir = Path(sequence_dir)
+
+        filenames = sorted(os.listdir(sequence_dir / 'results'))
+        self.rgb_frame_filenames = [f for f in filenames if f.startswith('frame')]
+        self.depth_frame_filenames = [f for f in filenames if f.startswith('depth')]
+
+        self.num_frames = len(self.rgb_frame_filenames)
+        self.length = self.num_frames
+        if seq_len > 0:
+            self.length = min(self.num_frames, seq_len)
+
+        gt_poses = (
+            np.loadtxt(self.sequence_dir / 'traj.txt', np.str_)
+            .astype(np.float64)
+            .reshape(-1, 4, 4)
+        )
+
+        # self.poses = np.linalg.inv(gt_poses)
+        self.poses = gt_poses
+
+        K = np.array(
+            [[300, 0, 299.75], [0, 300, 169.75], [0, 0, 1]],
+            dtype=np.float32,
+        )
+
+        self.Ks = torch.from_numpy(K).cuda()
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        if idx >= len(self):
+            raise StopIteration
+        rgb_filename = self.sequence_dir / ('results/' + self.rgb_frame_filenames[idx])
+        image = Image.open(rgb_filename)
+        image.thumbnail((600, 340), Image.Resampling.LANCZOS)
+        image = np.asarray(np.float32(image)) / 255.0
+        image = torch.Tensor(image).cuda()
+        height, width, _channels = image.shape
+
+        depth_filename = self.sequence_dir / (
+            'results/' + self.depth_frame_filenames[idx]
+        )
+        depth_im = Image.open(depth_filename)
+        depth_image = np.asarray(depth_im)
+        depth_image = torch.Tensor(depth_image.copy()).cuda() / 5000.0
+
+        gt_pose = torch.Tensor(self.poses[idx, ...])
+        camera = Camera(self.Ks.clone(), height, width)
+        frame = Frame(
+            image,
+            0.0,
+            camera,
+            Pose(),
+            gt_pose,
+            gt_depth=depth_image,
+            img_file=rgb_filename,
             index=idx,
         )
         return frame
