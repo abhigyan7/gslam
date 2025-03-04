@@ -34,13 +34,13 @@ from .warp import Warp
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 100
+    num_tracking_iters: int = 50
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'active-nerf'
 
     pose_optim_lr: float = 0.002
     pose_optim_lr_decay: float = 0.99
 
-    method: Literal['igs', 'warp', 'flow'] = 'igs'
+    method: Literal['igs', 'warp'] = 'igs'
 
     pose_regularization: float = 0
 
@@ -133,113 +133,67 @@ class Frontend(mp.Process):
         self.waiting_for_sync = True
 
     def track(self, new_frame: Frame):
+        n_iters = self.conf.num_tracking_iters
+
         if len(self.frames) == 0:
             self.initialize(new_frame)
             n_iters = 0
         elif len(self.frames) == 1:
             pose = self.frames[-1].pose()
-            new_frame.pose = Pose(pose.detach()).to(self.conf.device)
-            optimizer = torch.optim.Adam(
-                [
-                    {
-                        'params': new_frame.pose.parameters(),
-                        'lr': self.conf.pose_optim_lr,
-                    }
-                ]
-            )
-
-            scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                optimizer, self.conf.pose_optim_lr_decay
-            )
-            n_iters = self.conf.num_tracking_iters
         else:
             # constant motion model
             pose_a = self.frames[-2].pose()
             pose_b = self.frames[-1].pose()
-            pose_c = pose_b @ torch.linalg.inv(pose_a) @ pose_b
-            new_frame.pose = Pose(pose_c.detach()).to(self.conf.device)
-            optimizer = torch.optim.Adam(
-                [
-                    {
-                        'params': new_frame.pose.parameters(),
-                        'lr': self.conf.pose_optim_lr,
-                    }
-                ]
-            )
+            pose = pose_b @ torch.linalg.inv(pose_a) @ pose_b
 
-            scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                optimizer, self.conf.pose_optim_lr_decay
-            )
-            n_iters = self.conf.num_tracking_iters
+        if n_iters > 0:
+            new_frame.pose = Pose(pose.detach()).to(self.conf.device)
+            if self.conf.method in ['warp', 'igs']:
+                optimizer = torch.optim.Adam(
+                    new_frame.pose.parameters(),
+                    self.conf.pose_optim_lr,
+                )
+                scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                    optimizer, self.conf.pose_optim_lr_decay
+                )
 
-        _loss = 0.0
+        loss = 0.0
         outputs = None
         start_time = time.time()
 
-        for i in (
-            _pbar := tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}")
-        ):
-            if self.conf.method == 'igs':
-                outputs = self.splats(
-                    [new_frame.camera], [new_frame.pose], render_depth=True
-                )
-                rendered_rgb = outputs.rgbs[0]
-                betas = outputs.betas[0]
-                loss = self.tracking_loss(rendered_rgb, new_frame.img, betas)
+        if n_iters > 0:
+            if self.conf.method == 'warp':
+                loss = self.warp_track(new_frame, n_iters, optimizer, scheduler)
+            elif self.conf.method == 'igs':
+                loss = self.igs_track(new_frame, n_iters, optimizer, scheduler)
             else:
-                rendered_rgb, _normalized_warps, keep_mask = self.warp(
-                    self.reference_frame.pose(),
-                    new_frame.pose(),
-                    self.reference_frame.img,
-                    # self.reference_rgbs,
-                    self.reference_depthmap,
-                    # self.reference_depthmap,
-                )
-                masked_result = rendered_rgb[keep_mask, ...]
-                masked_gt = new_frame.img[keep_mask, ...]
-                loss = F.l1_loss(masked_result, masked_gt)
+                assert_never(self.conf.method)
 
-            # _loss = loss.item()
-
-            # loss += new_frame.pose.se3.norm() * self.conf.pose_regularization
-
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
-
-            # drdt = new_frame.pose.se3.detach().cpu().numpy()
-            # pbar.set_description(
-            #     f"[Tracking] frame {len(self.frames)}| loss: {_loss:.8f} "
-            # )
-            # new_frame.pose.normalize()
-
-            # if np.linalg.norm(drdt) < 2e-4:
-            #     break
-            if (i + 1) == n_iters:
-                _loss = loss.item()
+        outputs = None
+        if hasattr(self, 'splats'):
+            outputs = self.splats(
+                [new_frame.camera], [new_frame.pose], render_depth=True
+            )
 
         Thread(
             target=log_frame,
             args=(new_frame,),
             kwargs={
                 "outputs": outputs,
-                "loss": _loss,
-                "tracking_time": time.time() - start_time,
+                "loss": loss,
+                "tracking_time": time.time() - start_time if n_iters > 0 else -1,
             },
         ).start()
         Thread(
             target=self.save_tracking_stats,
-            args=(new_frame, _loss),
+            args=(new_frame, loss),
             kwargs={
                 "tracking_time": time.time() - start_time,
                 'outputs': outputs,
             },
         )
         self.frames.append(new_frame.strip())
-
         self.add_frame_to_backend(new_frame)
-
         return new_frame.pose()
 
     def add_frame_to_backend(self, new_frame: Frame):
@@ -258,7 +212,7 @@ class Frontend(mp.Process):
         self.reference_depthmap = depthmap.clone()
         self.reference_frame = self.keyframes[sorted(self.keyframes.keys())[-1]]
         self.reference_rgbs = rgbs
-        self.splats = splats
+        self.splats = deepcopy(splats)
         self.pose_graph = pose_graph
 
         for kf in self.keyframes.values():
@@ -584,3 +538,75 @@ class Frontend(mp.Process):
         self.logger.warning('frontend done.')
 
         self.frontend_done_event.set()
+
+    def warp_track(self, new_frame, n_iters, optimizer, scheduler):
+        _loss = 0.0
+        for i in (
+            _pbar := tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}")
+        ):
+            rendered_rgb, _normalized_warps, keep_mask = self.warp(
+                self.reference_frame.pose(),
+                new_frame.pose(),
+                self.reference_frame.img,
+                # self.reference_rgbs,
+                self.reference_depthmap,
+                # self.reference_depthmap,
+            )
+            masked_result = rendered_rgb[keep_mask, ...]
+            masked_gt = new_frame.img[keep_mask, ...]
+            loss = F.l1_loss(masked_result, masked_gt)
+
+            # _loss = loss.item()
+
+            # loss += new_frame.pose.se3.norm() * self.conf.pose_regularization
+
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+
+            # drdt = new_frame.pose.se3.detach().cpu().numpy()
+            # pbar.set_description(
+            #     f"[Tracking] frame {len(self.frames)}| loss: {_loss:.8f} "
+            # )
+            # new_frame.pose.normalize()
+
+            # if np.linalg.norm(drdt) < 2e-4:
+            #     break
+
+            if (i + 1) == n_iters:
+                _loss = loss.item()
+        return _loss
+
+    def igs_track(self, new_frame, n_iters, optimizer, scheduler):
+        _loss = 0.0
+        for i in (
+            _pbar := tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}")
+        ):
+            outputs = self.splats(
+                [new_frame.camera], [new_frame.pose], render_depth=True
+            )
+            rendered_rgb = outputs.rgbs[0]
+            betas = outputs.betas[0]
+            loss = self.tracking_loss(rendered_rgb, new_frame.img, betas)
+
+            # _loss = loss.item()
+
+            # loss += new_frame.pose.se3.norm() * self.conf.pose_regularization
+
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+
+            # drdt = new_frame.pose.se3.detach().cpu().numpy()
+            # pbar.set_description(
+            #     f"[Tracking] frame {len(self.frames)}| loss: {_loss:.8f} "
+            # )
+            # new_frame.pose.normalize()
+
+            # if np.linalg.norm(drdt) < 2e-4:
+            #     break
+            if (i + 1) == n_iters:
+                _loss = loss.item()
+        return _loss
