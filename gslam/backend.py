@@ -247,7 +247,7 @@ class Backend(torch.multiprocessing.Process):
                 if random_neighbor_of_ith_neighbor in window:
                     continue
                 window.add(random_neighbor_of_ith_neighbor)
-            print(f'neighbor sample: {window=}')
+            # print(f'neighbor sample: {window=}')
         else:
             n_last_keyframes_to_choose = min(
                 n_keyframes_total, self.conf.optim_window_last_n_keyframes
