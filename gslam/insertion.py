@@ -138,8 +138,13 @@ class InsertFromDepthMap(InsertionStrategy):
         # prefer to add N nsplats in the region where we don't have geometry already
         n_invalid_depth_splats = min(N, n_invalid_depth_pixels)
         n_valid_depth_splats = max(
-            0, min(N - n_invalid_depth_splats, n_valid_depth_pixels)
+            0, min(int(N / 2) - n_invalid_depth_splats, n_valid_depth_pixels)
         )
+
+        if n_invalid_depth_splats <= 0 and (
+            not self.insert_in_regions_with_depth and n_valid_depth_splats <= 0
+        ):
+            return 0
 
         if valid_depth_region.any():
             median_depth = depths[valid_depth_region].median()
@@ -196,6 +201,7 @@ class InsertFromDepthMap(InsertionStrategy):
             )
 
         if len(picks) == 0:
+            print("Early exit")
             return 0
         picks = torch.cat(picks)
 
@@ -234,34 +240,51 @@ class InsertFromDepthMap(InsertionStrategy):
         }
 
         if len(frames) > 1:
-            Ks = torch.stack([x.camera.intrinsics for x in frames])
-            viewmats = torch.stack([x.pose() for x in frames])
-            est_depths = torch.stack([x.est_depths for x in frames])
-            height, width = frame.camera.height, frame.camera.width
+            for i in range(2):
+                Ks = torch.stack([x.camera.intrinsics for x in frames])
+                viewmats = torch.stack([x.pose() for x in frames])
+                est_depths = torch.stack([x.est_depths for x in frames])
+                height, width = frame.camera.height, frame.camera.width
 
-            camera_ids, gaussian_ids, _, means2d, depths = get_new_splat_depth(
-                new_params,
-                viewmats,
-                Ks,
-                width,
-                height,
-            )
+                camera_ids, gaussian_ids, _, means2d, depths = get_new_splat_depth(
+                    new_params,
+                    viewmats,
+                    Ks,
+                    width,
+                    height,
+                )
 
-            means2d = means2d.to(int)
-            means_width = torch.clamp(means2d[:, 0], max=width - 1, min=0)
-            means_height = torch.clamp(means2d[:, 1], max=height - 1, min=0)
-            # ForkedPdb(self.global_pause_event).set_trace()
-            is_in_front = gaussian_ids[
-                depths < est_depths[camera_ids, means_height, means_width]
-            ]
-            keep_mask = torch.ones(new_params['means'].shape[0], dtype=torch.bool)
-            keep_mask[is_in_front] = False
-            num_splats = new_params['means'].shape[0]
-            for k, v in new_params.items():
-                new_params[k] = new_params[k][keep_mask]
+                means2d = means2d.to(int)
+                means_width = torch.clamp(means2d[:, 0], max=width - 1, min=0)
+                means_height = torch.clamp(means2d[:, 1], max=height - 1, min=0)
+                is_in_front = depths < est_depths[camera_ids, means_height, means_width]
 
-            new_num_splats = new_params['means'].shape[0]
-            print(f"Inserted {new_num_splats} splats from {num_splats} new splats")
+                keep_mask = torch.ones(new_params['means'].shape[0], dtype=torch.bool)
+                keep_mask[gaussian_ids[is_in_front]] = False
+                num_splats = new_params['means'].shape[0]
+                # ForkedPdb(self.global_pause_event).set_trace()
+                # new_params['means'][~keep_mask] = new_params['means'][~keep_mask] + viewmats[camera_ids[is_in_front],:3,2]
+                if n_invalid_depth_splats <= 0:
+                    for k, v in new_params.items():
+                        new_params[k] = new_params[k][keep_mask]
+                    new_num_splats = new_params['means'].shape[0]
+                    print(
+                        f"Inserted {new_num_splats} splats from {num_splats} new splats\n"
+                    )
+                    break
+
+                #                if i ==0:
+                #                    #new_params['means'].index_add_(0, gaussian_ids[is_in_front], viewmats[camera_ids[is_in_front],:3,2])
+                #                    new_params['means'][~keep_mask] += 0.5 * new_params['means'][~keep_mask] +frame.pose()[:3,3] #move the gaussian away from the current frame
+                #                    print(f"{torch.count_nonzero(keep_mask)} unfit gaussians detected")
+                else:
+                    for k, v in new_params.items():
+                        new_params[k] = new_params[k][keep_mask]
+                    new_num_splats = new_params['means'].shape[0]
+                    print(
+                        f"Inserted {new_num_splats} splats from {num_splats} new splats\n"
+                    )
+                    break
 
         self._add_new_splats(splats, optimizers, new_params)
 
