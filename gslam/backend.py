@@ -68,7 +68,7 @@ class MapConfig:
     optim_window_random_keyframes: int = 2
 
     num_iters_mapping: int = 15
-    num_iters_initialization: int = 110
+    num_iters_initialization: int = 400
 
     opacity_pruning_threshold: float = 0.2
     size_pruning_threshold: int = 256
@@ -220,21 +220,50 @@ class Backend(torch.multiprocessing.Process):
             + self.conf.optim_window_random_keyframes
         )
         n_keyframes_total = len(self.keyframes)
-        n_last_keyframes_to_choose = min(
-            n_keyframes_total, self.conf.optim_window_last_n_keyframes
-        )
-        n_random_keyframes_to_choose = min(
-            0, window_size_total - n_last_keyframes_to_choose
-        )
 
-        window = list(self.keyframes.keys())[-n_last_keyframes_to_choose:]
-        window.extend(
-            random.sample(
-                list(self.keyframes.keys())[:-n_last_keyframes_to_choose],
-                n_random_keyframes_to_choose,
+        if self.conf.enable_pgo:
+            # get neighborhood from fan out
+            latest_keyframe = sorted(self.keyframes.keys())[-1]
+            window = set()
+            window.add(latest_keyframe)
+            neighbors = self.pose_graph[latest_keyframe]
+            if 0 > len(neighbors) > window_size_total:
+                window.update(random.sample(neighbors, window_size_total))
+            elif 0 < len(neighbors):
+                window.update(list(neighbors))
+            spots_left_in_window = window_size_total - len(window)
+            for i in range(spots_left_in_window):
+                if len(neighbors) == 0:
+                    break
+                # ForkedPdb(self.global_pause_event).set_trace()
+                neighbors_of_ith_neighbor = self.pose_graph[
+                    random.sample(sorted(neighbors), 1)[0]
+                ]
+                if len(neighbors_of_ith_neighbor) == 0:
+                    continue
+                random_neighbor_of_ith_neighbor = random.sample(
+                    sorted(neighbors_of_ith_neighbor), 1
+                )[0]
+                if random_neighbor_of_ith_neighbor in window:
+                    continue
+                window.add(random_neighbor_of_ith_neighbor)
+            print(f'neighbor sample: {window=}')
+        else:
+            n_last_keyframes_to_choose = min(
+                n_keyframes_total, self.conf.optim_window_last_n_keyframes
             )
-        )
-        window = [self.keyframes[i] for i in window]
+            n_random_keyframes_to_choose = min(
+                0, window_size_total - n_last_keyframes_to_choose
+            )
+
+            window = list(self.keyframes.keys())[-n_last_keyframes_to_choose:]
+            window.extend(
+                random.sample(
+                    list(self.keyframes.keys())[:-n_last_keyframes_to_choose],
+                    n_random_keyframes_to_choose,
+                )
+            )
+        window = [self.keyframes[i] for i in sorted(window)]
         return window
 
     def optimize_map(self, n_iters: int = None, prune=True, regularize=True):
@@ -298,7 +327,7 @@ class Backend(torch.multiprocessing.Process):
             if regularize:
                 total_loss += +self.conf.depth_regularization_weight * depth_loss
 
-            if self.conf.enable_pgo and len(self.pose_graph) > 0:
+            if self.conf.enable_pgo and len(self.pose_graph) > 1:
                 kf_1 = random.sample(sorted(self.pose_graph.keys()), 1)[0]
                 kf_2 = random.sample(sorted(self.pose_graph[kf_1]), 1)[0]
 
@@ -527,6 +556,8 @@ class Backend(torch.multiprocessing.Process):
         self.splats = GaussianSplattingData.empty().to(self.conf.device)
         self.initialize_optimizers()
 
+        self.pose_graph[frame.index] = set()
+
         H, W, _ = frame.img.shape
         mock_depth_map = torch.ones((1, H, W), device=self.conf.device)
         mock_depth_map = mock_depth_map + (torch.randn_like(mock_depth_map) - 0.5) * 0.3
@@ -583,7 +614,7 @@ class Backend(torch.multiprocessing.Process):
             }
         )
 
-        if len(self.keyframes) >= 2:
+        if len(self.keyframes) >= 1:
             add_constraint(self.pose_graph, *(list(self.keyframes.keys())[-2:]))
 
     def to_add_pg_edge(

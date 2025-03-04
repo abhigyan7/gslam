@@ -34,7 +34,7 @@ from .warp import Warp
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 100
+    num_tracking_iters: int = 50
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'active-nerf'
 
     pose_optim_lr: float = 0.002
