@@ -96,8 +96,8 @@ class MapConfig:
 
     kf_cov = 0.9
     kf_oc = 0.99
-    kf_m = 0.3
-    kf_cos = math.cos(math.pi / 15)
+    kf_m = 0.2  # 0.3
+    kf_cos = math.cos(math.pi / 30)
 
 
 def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
@@ -492,8 +492,8 @@ class Backend(torch.multiprocessing.Process):
                 deepcopy(self.keyframes),
                 self.last_kf_depthmap.detach(),
                 self.last_kf_rgbs.detach(),
-                # deepcopy(self.splats),
-                self.splats.mask(self.last_outputs.radii[0] > 0).no_grad_clone(),
+                self.splats.no_grad_clone(),
+                # self.splats.mask(self.last_outputs.radii[0] > 0).no_grad_clone(),
                 deepcopy(self.pose_graph),
             )
         )
@@ -574,7 +574,7 @@ class Backend(torch.multiprocessing.Process):
             mock_outputs,
             frame,
             5000,
-            frames=list(self.keyframes.values()),
+            keyframes=list(self.keyframes.values()),
         )
 
         return
@@ -593,7 +593,7 @@ class Backend(torch.multiprocessing.Process):
             outputs,
             frame,
             N=100,
-            frames=list(self.keyframes.values()),
+            keyframes=list(self.keyframes.values()),
         )
 
         new_frame = Frame(
@@ -695,11 +695,11 @@ class Backend(torch.multiprocessing.Process):
             render_depth=True,
         )
 
-        photometric_error = (outputs.rgbs[0] - new_frame.img).square().mean()
+        _photometric_error = (outputs.rgbs[0] - new_frame.img).square().mean()
         # TODO parameterize this
         # TODO this isn't kicking in
-        if photometric_error.item() > 0.15:
-            return True
+        # if photometric_error.item() > 0.15:
+        #   return True
 
         new_frame.visible_gaussians = outputs.radii[0] > 0
         previous_keyframe.visible_gaussians = outputs.radii[1] > 0
@@ -724,9 +724,9 @@ class Backend(torch.multiprocessing.Process):
         new_frame.visible_gaussians = None
         previous_keyframe.visible_gaussians = None
 
-        iou = intersection / union
-        if iou < self.conf.kf_cov:
-            return True
+        _iou = intersection / union
+        # if iou < self.conf.kf_cov:
+        #   return True
         pose_difference = torch.linalg.inv(new_frame.pose()) @ previous_keyframe.pose()
         translation = pose_difference[:3, 3].pow(2.0).sum().pow(0.5).item()
         median_depth = outputs.depthmaps[outputs.alphas[..., 0] > 0.1].median()
@@ -737,6 +737,7 @@ class Backend(torch.multiprocessing.Process):
             new_frame.pose()[:3, 2], previous_keyframe.pose()[:3, 2], dim=0
         )
         if cosine_sim < self.conf.kf_cos:
+            print(f"Added keyframe: rotation-{torch.acos(cosine_sim)*180/torch.pi}\n")
             return True
         return False
 
