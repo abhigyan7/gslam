@@ -212,7 +212,7 @@ class Frontend(mp.Process):
         self.reference_depthmap = depthmap.clone()
         self.reference_frame = self.keyframes[sorted(self.keyframes.keys())[-1]]
         self.reference_rgbs = rgbs
-        self.splats = splats
+        self.splats = deepcopy(splats)
         self.pose_graph = pose_graph
 
         for kf in self.keyframes.values():
@@ -244,6 +244,20 @@ class Frontend(mp.Process):
 
     @torch.no_grad()
     def dump_pointcloud(self):
+        modified_colors = self.splats.colors.detach().cpu().numpy()
+        modified_opacities = self.splats.opacities.detach().cpu().numpy()
+        modified_colors = 1 / (
+            1
+            + np.exp(
+                -np.concatenate(
+                    [modified_colors, modified_opacities[..., None]], axis=1
+                )
+            )
+        )
+        if self.splats.ages.max() != 0:
+            modified_colors[
+                self.splats.ages.cpu().numpy() == self.splats.ages.max().cpu().numpy()
+            ] = np.array([[0, 1, 0, 1]])
         rr.log(
             '/tracking/pc',
             rr.Points3D(
@@ -254,18 +268,7 @@ class Frontend(mp.Process):
                 .cpu()
                 .numpy()
                 * 0.5,
-                colors=torch.sigmoid(
-                    torch.cat(
-                        [
-                            self.splats.colors,
-                            self.splats.opacities[..., None],
-                        ],
-                        dim=1,
-                    )
-                )
-                .detach()
-                .cpu()
-                .numpy(),
+                colors=modified_colors,
             ),
         )
 
@@ -279,18 +282,7 @@ class Frontend(mp.Process):
                 half_sizes=radii.cpu().numpy(),
                 centers=self.splats.means.cpu().numpy(),
                 quaternions=q,
-                colors=torch.sigmoid(
-                    torch.cat(
-                        [
-                            self.splats.colors,
-                            self.splats.opacities[..., None],
-                        ],
-                        dim=1,
-                    )
-                )
-                .detach()
-                .cpu()
-                .numpy(),
+                colors=modified_colors,
                 fill_mode=rr.components.FillMode.Solid,
             ),
         )

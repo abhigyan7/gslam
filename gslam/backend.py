@@ -3,6 +3,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from itertools import combinations
 import logging
+import math
 import random
 import threading
 import time
@@ -96,6 +97,7 @@ class MapConfig:
     kf_cov = 0.9
     kf_oc = 0.99
     kf_m = 0.3
+    kf_cos = math.cos(math.pi / 15)
 
 
 def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
@@ -729,6 +731,12 @@ class Backend(torch.multiprocessing.Process):
         translation = pose_difference[:3, 3].pow(2.0).sum().pow(0.5).item()
         median_depth = outputs.depthmaps[outputs.alphas[..., 0] > 0.1].median()
         if translation > self.conf.kf_m * median_depth:
+            return True
+
+        cosine_sim = torch.nn.functional.cosine_similarity(
+            new_frame.pose()[:3, 2], previous_keyframe.pose()[:3, 2], dim=0
+        )
+        if cosine_sim < self.conf.kf_cos:
             return True
         return False
 
