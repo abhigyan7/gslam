@@ -26,15 +26,23 @@ from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, PoseZhou as Pose, matrix_to_quaternion
 from .rasterization import RasterizationOutput
 from .trajectory import evaluate_trajectories
-from .utils import torch_image_to_np, torch_to_pil, false_colormap, unvmap
+from .utils import (
+    torch_image_to_np,
+    torch_to_pil,
+    false_colormap,
+    unvmap,
+    StopOnPlateau,
+)
 from .visualization import log_frame, get_blueprint
 from .warp import Warp
+
+plt.switch_backend('agg')
 
 
 @dataclass
 class TrackingConfig:
     device: str = 'cuda'
-    num_tracking_iters: int = 50
+    num_tracking_iters: int = 200
     photometric_loss: Literal['l1', 'mse', 'active-nerf'] = 'active-nerf'
 
     pose_optim_lr: float = 0.002
@@ -104,6 +112,8 @@ class Frontend(mp.Process):
                 return error.square().mean()
             case 'active-nerf':
                 return (error.square().sum(dim=-1) * betas.pow(-2.0)).mean()
+            case 'none':
+                return error
             case _:
                 assert_never(self.conf.photometric_loss)
 
@@ -149,9 +159,12 @@ class Frontend(mp.Process):
         if n_iters > 0:
             new_frame.pose = Pose(pose.detach()).to(self.conf.device)
             if self.conf.method in ['warp', 'igs']:
-                optimizer = torch.optim.Adam(
+                optimizer = torch.optim.SGD(
                     new_frame.pose.parameters(),
                     self.conf.pose_optim_lr,
+                    fused=True,
+                    momentum=0.8,
+                    nesterov=True,
                 )
                 scheduler = torch.optim.lr_scheduler.ExponentialLR(
                     optimizer, self.conf.pose_optim_lr_decay
@@ -165,7 +178,7 @@ class Frontend(mp.Process):
             if self.conf.method == 'warp':
                 loss = self.warp_track(new_frame, n_iters, optimizer, scheduler)
             elif self.conf.method == 'igs':
-                loss = self.igs_track(new_frame, n_iters, optimizer, scheduler)
+                loss = self.igs_track_lbfgs(new_frame, n_iters, optimizer, scheduler)
             else:
                 assert_never(self.conf.method)
 
@@ -181,7 +194,8 @@ class Frontend(mp.Process):
             kwargs={
                 "outputs": outputs,
                 "loss": loss,
-                "tracking_time": time.time() - start_time if n_iters > 0 else -1,
+                "tracking_time": time.time() - start_time if n_iters > 0 else None,
+                "is_tracking_frame": True,
             },
         ).start()
         Thread(
@@ -216,7 +230,7 @@ class Frontend(mp.Process):
         self.pose_graph = pose_graph
 
         for kf in self.keyframes.values():
-            log_frame(kf, name=f'/tracking/kf/{kf.index}')
+            log_frame(kf, name=f'/tracking/kf/{kf.index}', is_tracking_frame=False)
         line_strips = []
         for kf_i in self.pose_graph:
             for kf_j in self.pose_graph[kf_i]:
@@ -578,10 +592,11 @@ class Frontend(mp.Process):
                 _loss = loss.item()
         return _loss
 
-    def igs_track(self, new_frame, n_iters, optimizer, scheduler):
+    def igs_track(self, new_frame: Frame, n_iters, optimizer, scheduler):
         _loss = 0.0
+        stop_criterion = StopOnPlateau(20, 0.1)
         for i in (
-            _pbar := tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}")
+            pbar := tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}")
         ):
             outputs = self.splats(
                 [new_frame.camera], [new_frame.pose], render_depth=True
@@ -590,7 +605,7 @@ class Frontend(mp.Process):
             betas = outputs.betas[0]
             loss = self.tracking_loss(rendered_rgb, new_frame.img, betas)
 
-            # _loss = loss.item()
+            _loss = loss.item()
 
             # loss += new_frame.pose.se3.norm() * self.conf.pose_regularization
 
@@ -599,14 +614,40 @@ class Frontend(mp.Process):
             scheduler.step()
             optimizer.zero_grad()
 
-            # drdt = new_frame.pose.se3.detach().cpu().numpy()
-            # pbar.set_description(
-            #     f"[Tracking] frame {len(self.frames)}| loss: {_loss:.8f} "
-            # )
-            # new_frame.pose.normalize()
+            pbar.set_description(
+                f"[Tracking] frame {len(self.frames)}| loss: {_loss:.8f} "
+            )
 
-            # if np.linalg.norm(drdt) < 2e-4:
-            #     break
-            if (i + 1) == n_iters:
-                _loss = loss.item()
-        return _loss
+            if stop_criterion.stop(_loss):
+                print(f'Early stop at step {i}, loss: {_loss}')
+                break
+        return loss
+
+    def igs_track_lbfgs(self, new_frame: Frame, n_iters, optimizer, scheduler):
+        n_iters = 0
+        optimizer = torch.optim.LBFGS(
+            new_frame.pose.parameters(),
+            history_size=4,
+            line_search_fn='strong_wolfe',
+            tolerance_change=1e-5,
+        )
+
+        def closure():
+            nonlocal n_iters
+            n_iters += 1
+            if torch.is_grad_enabled():
+                optimizer.zero_grad()
+            outputs = self.splats(
+                [new_frame.camera], [new_frame.pose], render_depth=True
+            )
+            rendered_rgb = outputs.rgbs[0]
+            betas = outputs.betas[0]
+            loss = self.tracking_loss(rendered_rgb, new_frame.img, betas)
+            if loss.requires_grad:
+                loss.backward()
+            return loss
+
+        optimizer.step(closure)
+        loss = closure().item()
+        print(f'LBFGS: {new_frame.index} {loss=} {n_iters=}')
+        return loss

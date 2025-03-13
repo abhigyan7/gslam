@@ -12,7 +12,6 @@ from typing import Dict, assert_never
 from fused_ssim import fused_ssim
 import nerfview
 import torch
-import torch.nn.functional as F
 import tqdm
 import viser
 
@@ -329,35 +328,9 @@ class Backend(torch.multiprocessing.Process):
             if regularize:
                 total_loss += +self.conf.depth_regularization_weight * depth_loss
 
-            if self.conf.enable_pgo and len(self.pose_graph) > 1:
-                kf_1 = random.sample(sorted(self.pose_graph.keys()), 1)[0]
-                kf_2 = random.sample(sorted(self.pose_graph[kf_1]), 1)[0]
-
-                pgo_outputs: RasterizationOutput = self.splats(
-                    [self.keyframes[kf].camera for kf in (kf_1, kf_2)],
-                    [self.keyframes[kf].pose for kf in (kf_1, kf_2)],
-                    render_depth=True,
-                )
-
-                result, _normalized_warps, keep_mask = self.warp(
-                    self.keyframes[kf_1].pose(),
-                    self.keyframes[kf_2].pose(),
-                    pgo_outputs.rgbs[0],
-                    pgo_outputs.depthmaps[0],
-                )
-
-                result = result[keep_mask, ...]
-                gt = self.keyframes[kf_2].img[keep_mask, ...]
-
-                total_loss += F.l1_loss(result, gt) * self.conf.pgo_loss_weight
-
             outputs.means2d.retain_grad()
 
             total_loss.backward()
-
-            # with torch.no_grad():
-            #     self.splats.betas.mul_(self.conf.beta_ema_weight)
-            #     self.splats.betas.add_((1-self.conf.beta_ema_weight) * self.splats.params.grad.norm())
 
             if (self.total_step % 100) == 0:
                 self.insertion_3dgs.step(
@@ -526,30 +499,37 @@ class Backend(torch.multiprocessing.Process):
         self.splat_optimizers['means'] = torch.optim.Adam(
             params=[self.splats.means],
             lr=self.conf.means_lr,
+            fused=True,
         )
         self.splat_optimizers['quats'] = torch.optim.Adam(
             params=[self.splats.quats],
             lr=self.conf.quat_lr,
+            fused=True,
         )
         self.splat_optimizers['scales'] = torch.optim.Adam(
             params=[self.splats.scales],
             lr=self.conf.scale_lr,
+            fused=True,
         )
         self.splat_optimizers['opacities'] = torch.optim.Adam(
             params=[self.splats.opacities],
             lr=self.conf.opacity_lr,
+            fused=True,
         )
         self.splat_optimizers['colors'] = torch.optim.Adam(
             params=[self.splats.colors],
             lr=self.conf.color_lr,
+            fused=True,
         )
         self.splat_optimizers['log_uncertainties'] = torch.optim.Adam(
             params=[self.splats.log_uncertainties],
             lr=self.conf.log_uncertainty_lr,
+            fused=True,
         )
         self.pose_optimizer = torch.optim.Adam(
             params=[torch.empty(0)],
             lr=0.001,
+            fused=True,
         )
 
     def initialize(self, frame: Frame):

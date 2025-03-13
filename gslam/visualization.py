@@ -17,6 +17,7 @@ def log_frame(
     outputs: RasterizationOutput = None,
     loss: float = None,
     tracking_time: float = None,
+    is_tracking_frame: bool = False,
 ) -> None:
     q, t = f.pose.to_qt()
     q = np.roll(q.detach().cpu().numpy().reshape(-1), -1)
@@ -44,11 +45,11 @@ def log_frame(
             ],
         ),
     )
-
-    rr.log(
-        '/tracking/frame_index',
-        rr.TextDocument(f"# {f.index}", media_type=rr.MediaType.MARKDOWN),
-    )
+    if is_tracking_frame:
+        rr.log(
+            '/tracking/frame_index',
+            rr.TextDocument(f"# {f.index}", media_type=rr.MediaType.MARKDOWN),
+        )
 
     if outputs is not None and f.img is not None:
         rr.log(f"{name}/image", rr.Image(torch_to_pil(outputs.rgbs[0])).compress(90))

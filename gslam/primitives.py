@@ -89,6 +89,15 @@ class PoseZhou(torch.nn.Module):
         return unvmap(matrix_to_quaternion)(R), t
 
 
+def func_zhou(dR, dt, Rt) -> torch.Tensor:
+    identity = torch.tensor([1, 0, 0, 0, 1, 0], device=Rt.device, dtype=torch.float32)
+    rot = unvmap(rotation_6d_to_matrix)(dR + identity)
+    transform = torch.eye(4, device=Rt.device)
+    transform[..., :3, :3] = rot
+    transform[..., :3, 3] = dt
+    return torch.matmul(Rt, transform)
+
+
 class _Pose(torch.nn.Module):
     def __init__(self, initial_pose: torch.Tensor = None, is_learnable: bool = True):
         super().__init__()
@@ -380,7 +389,7 @@ class Frame:
     img: torch.Tensor
     timestamp: float
     camera: Camera
-    pose: Pose
+    pose: PoseZhou
     gt_pose: torch.Tensor
     index: int
     gt_depth: torch.Tensor = None

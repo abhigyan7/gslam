@@ -5,6 +5,8 @@ from matplotlib import pyplot as plt
 
 from .primitives import Frame
 
+plt.switch_backend('agg')
+
 
 def kabsch_umeyama(
     A: np.ndarray, B: np.ndarray
