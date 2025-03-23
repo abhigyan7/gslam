@@ -123,8 +123,12 @@ class InsertFromDepthMap(InsertionStrategy):
         frame: Frame,
         N: int,
         keyframes: list[Frame],
+        gt_depthmap: torch.Tensor = None,
     ):
-        depths = rasterization_output.depthmaps[0, ...]
+        if gt_depthmap is None:
+            depths = rasterization_output.depthmaps[0, ...]
+        else:
+            depths = gt_depthmap
         alphas = rasterization_output.alphas[0, ..., 0]
 
         device = depths.device

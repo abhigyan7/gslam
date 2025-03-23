@@ -54,6 +54,8 @@ class TrackingConfig:
 
     learn_exposure_params: bool = True
 
+    use_gt_depths: bool = False
+
 
 class Frontend(mp.Process):
     def __init__(
@@ -105,19 +107,27 @@ class Frontend(mp.Process):
         gt_img: torch.Tensor,
         rendered_img: torch.Tensor,
         betas: torch.Tensor = None,
+        rendered_depth: torch.Tensor = None,
+        gt_depth: torch.Tensor = None,
     ) -> torch.Tensor:
         error = rendered_img - gt_img
+        loss = None
         match self.conf.photometric_loss:
             case 'l1':
-                return error.abs().mean()
+                loss = error.abs().mean()
             case 'mse':
-                return error.square().mean()
+                loss = error.square().mean()
             case 'active-nerf':
-                return (error.square().sum(dim=-1) * betas.pow(-2.0)).mean()
+                loss = (error.square().sum(dim=-1) * betas.pow(-2.0)).mean()
             case 'none':
-                return error
+                loss = error
             case _:
                 assert_never(self.conf.photometric_loss)
+        if self.conf.use_gt_depths:
+            depth_error = (rendered_depth - gt_depth)[gt_depth > 0.0]
+            depth_loss = depth_error.abs().mean()
+            loss += depth_loss * 0.01
+        return loss
 
     def tracking_residual(
         self,
@@ -670,7 +680,7 @@ class Frontend(mp.Process):
             n_iters += 1
             if torch.is_grad_enabled():
                 optimizer.zero_grad()
-            outputs = self.splats(
+            outputs: RasterizationOutput = self.splats(
                 [new_frame.camera], [new_frame.pose], render_depth=True
             )
             if self.conf.learn_exposure_params:
@@ -679,7 +689,13 @@ class Frontend(mp.Process):
                     + new_frame.exposure_params[1]
                 )
             betas = outputs.betas[0]
-            loss = self.tracking_loss(rendered_rgb, new_frame.img, betas)
+            loss = self.tracking_loss(
+                rendered_rgb,
+                new_frame.img,
+                betas,
+                outputs.depthmaps[0],
+                new_frame.gt_depth,
+            )
             if loss.requires_grad:
                 loss.backward()
             return loss

@@ -93,10 +93,12 @@ class MapConfig:
     enable_pgo: bool = False
     pgo_loss_weight: float = 0.01
 
-    kf_cov = 0.9
-    kf_oc = 0.99
-    kf_m = 0.2  # 0.3
-    kf_cos = math.cos(math.pi / 30)
+    kf_cov: float = 0.9
+    kf_oc: float = 0.99
+    kf_m: float = 0.2  # 0.3
+    kf_cos: float = math.cos(math.pi / 30)
+
+    use_gt_depths: bool = False
 
 
 def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
@@ -315,7 +317,7 @@ class Backend(torch.multiprocessing.Process):
             isotropic_loss = (
                 (self.splats.scales.exp()[visible_gaussians] - mean_scales).abs().sum()
             )
-            depth_loss = edge_aware_tv(
+            depth_regularization_loss = edge_aware_tv(
                 outputs.depthmaps,
                 outputs.rgbs,
                 outputs.alphas[..., 0] > 0.4,
@@ -331,7 +333,15 @@ class Backend(torch.multiprocessing.Process):
                 + self.conf.isotropic_regularization_weight * isotropic_loss
             )
             if regularize:
-                total_loss += +self.conf.depth_regularization_weight * depth_loss
+                total_loss += (
+                    +self.conf.depth_regularization_weight * depth_regularization_loss
+                )
+
+            if self.conf.use_gt_depths:
+                gt_depths = create_batch(window, lambda f: f.gt_depth)
+                depth_residual = outputs.depthmaps - gt_depths
+                depth_loss = (depth_residual[gt_depths > 0]).abs().mean()
+                total_loss += depth_loss * 0.1
 
             outputs.means2d.retain_grad()
 
@@ -560,6 +570,7 @@ class Backend(torch.multiprocessing.Process):
             frame,
             5000,
             keyframes=list(self.keyframes.values()),
+            gt_depthmap=frame.gt_depth if self.conf.use_gt_depths else None,
         )
 
         return
