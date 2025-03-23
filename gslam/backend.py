@@ -282,6 +282,7 @@ class Backend(torch.multiprocessing.Process):
             cameras = [x.camera for x in window]
             poses = torch.nn.ModuleList([x.pose for x in window])
             gt_imgs = create_batch(window, lambda x: x.img)
+            exposure_params = create_batch(window, lambda x: x.exposure_params)
             self.zero_grad_all_optimizers()
 
             outputs: RasterizationOutput = self.splats(
@@ -290,8 +291,12 @@ class Backend(torch.multiprocessing.Process):
                 render_depth=True,
             )
 
+            rendered_rgbs = outputs.rgbs * exposure_params[..., 0].view(
+                -1, 1, 1, 1
+            ) + exposure_params[..., 1].view(-1, 1, 1, 1)
+
             if self.conf.active_gs:
-                photometric_loss = (outputs.rgbs - gt_imgs).square().sum(dim=-1)
+                photometric_loss = (rendered_rgbs - gt_imgs).square().sum(dim=-1)
                 photometric_loss = photometric_loss / (2 * outputs.betas.square())
                 photometric_loss = photometric_loss.mean()
                 photometric_loss = (
@@ -586,6 +591,9 @@ class Backend(torch.multiprocessing.Process):
             img_file=frame.img_file,
             index=frame.index,
             est_depths=outputs.depths,
+            exposure_params=frame.exposure_params.detach()
+            .clone()
+            .requires_grad_(False),
         )
 
         self.keyframes[new_frame.index] = new_frame

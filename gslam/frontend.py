@@ -52,6 +52,8 @@ class TrackingConfig:
 
     pose_regularization: float = 0
 
+    learn_exposure_params: bool = True
+
 
 class Frontend(mp.Process):
     def __init__(
@@ -133,6 +135,9 @@ class Frontend(mp.Process):
         self.reference_frame = new_frame
         self.reference_depthmap = torch.ones_like(new_frame.gt_depth)
         self.reference_rgbs = new_frame.img
+        new_frame.exposure_params = torch.nn.Parameter(
+            torch.zeros([2], device=new_frame.img.device, requires_grad=False)
+        )
 
         if self.conf.method == 'igs':
             self.request_initialization(new_frame)
@@ -156,6 +161,14 @@ class Frontend(mp.Process):
             pose_b = self.frames[-1].pose()
             pose = pose_b @ torch.linalg.inv(pose_a) @ pose_b
 
+        new_frame.exposure_params = torch.nn.Parameter(
+            torch.zeros(
+                [2],
+                device=new_frame.img.device,
+                requires_grad=self.conf.learn_exposure_params,
+            )
+        )
+
         if n_iters > 0:
             new_frame.pose = Pose(pose.detach()).to(self.conf.device)
             if self.conf.method in ['warp', 'igs']:
@@ -169,6 +182,13 @@ class Frontend(mp.Process):
                 scheduler = torch.optim.lr_scheduler.ExponentialLR(
                     optimizer, self.conf.pose_optim_lr_decay
                 )
+                if self.conf.learn_exposure_params:
+                    optimizer.add_param_group(
+                        {
+                            'params': new_frame.exposure_params,
+                            'lr': 0.01,
+                        }
+                    )
 
         loss = 0.0
         outputs = None
@@ -207,7 +227,8 @@ class Frontend(mp.Process):
             },
         )
         self.frames.append(new_frame.strip())
-        self.add_frame_to_backend(new_frame)
+        if new_frame.index > 0:
+            self.add_frame_to_backend(new_frame)
         return new_frame.pose()
 
     def add_frame_to_backend(self, new_frame: Frame):
@@ -566,6 +587,11 @@ class Frontend(mp.Process):
                 self.reference_depthmap,
                 # self.reference_depthmap,
             )
+            if self.conf.learn_exposure_params:
+                rendered_rgb = (
+                    rendered_rgb * new_frame.exposure_params[0].exp()
+                    + new_frame.exposure_params[1]
+                )
             masked_result = rendered_rgb[keep_mask, ...]
             masked_gt = new_frame.img[keep_mask, ...]
             loss = F.l1_loss(masked_result, masked_gt)
@@ -601,7 +627,11 @@ class Frontend(mp.Process):
             outputs = self.splats(
                 [new_frame.camera], [new_frame.pose], render_depth=True
             )
-            rendered_rgb = outputs.rgbs[0]
+            if self.conf.learn_exposure_params:
+                rendered_rgb = (
+                    outputs.rgbs[0] * new_frame.exposure_params[0].exp()
+                    + new_frame.exposure_params[1]
+                )
             betas = outputs.betas[0]
             loss = self.tracking_loss(rendered_rgb, new_frame.img, betas)
 
@@ -625,8 +655,11 @@ class Frontend(mp.Process):
 
     def igs_track_lbfgs(self, new_frame: Frame, n_iters, optimizer, scheduler):
         n_iters = 0
+        params = list(new_frame.pose.parameters())
+        if self.conf.learn_exposure_params:
+            params.append(new_frame.exposure_params)
         optimizer = torch.optim.LBFGS(
-            new_frame.pose.parameters(),
+            params,
             history_size=4,
             line_search_fn='strong_wolfe',
             tolerance_change=1e-5,
@@ -640,7 +673,11 @@ class Frontend(mp.Process):
             outputs = self.splats(
                 [new_frame.camera], [new_frame.pose], render_depth=True
             )
-            rendered_rgb = outputs.rgbs[0]
+            if self.conf.learn_exposure_params:
+                rendered_rgb = (
+                    outputs.rgbs[0] * new_frame.exposure_params[0].exp()
+                    + new_frame.exposure_params[1]
+                )
             betas = outputs.betas[0]
             loss = self.tracking_loss(rendered_rgb, new_frame.img, betas)
             if loss.requires_grad:
@@ -649,5 +686,7 @@ class Frontend(mp.Process):
 
         optimizer.step(closure)
         loss = closure().item()
-        print(f'LBFGS: {new_frame.index} {loss=} {n_iters=}')
+        print(
+            f'LBFGS: {new_frame.index} {loss=} {n_iters=}, Exposure Params: {new_frame.exposure_params.data}'
+        )
         return loss

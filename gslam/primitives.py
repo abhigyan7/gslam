@@ -396,6 +396,7 @@ class Frame:
     img_file: str = None
     visible_gaussians: torch.Tensor = None
     est_depths: torch.Tensor = None
+    exposure_params: torch.Tensor = None
 
     def to(self, device):
         attributes = vars(self)
@@ -417,6 +418,7 @@ class Frame:
             self.img_file,
             None,
             None,
+            self.exposure_params.detach().clone(),
         ).to(self.img.device)
 
 
