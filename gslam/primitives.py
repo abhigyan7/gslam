@@ -403,11 +403,11 @@ class Frame:
         new_attributes = {
             k: v.to(device) if hasattr(v, 'to') else v for k, v in attributes.items()
         }
-        return Frame(**new_attributes)
+        return type(self)(**new_attributes)
 
     @torch.no_grad()
     def strip(self):
-        return Frame(
+        return type(self)(
             None,
             self.timestamp,
             self.camera,
@@ -420,6 +420,21 @@ class Frame:
             None,
             self.exposure_params.detach().clone(),
         ).to(self.img.device)
+
+
+@dataclass
+class IMUFrame:
+    accel: torch.Tensor
+    gyro: torch.Tensor
+    timestamp: float
+    index: int
+
+    def to(self, device):
+        attributes = vars(self)
+        new_attributes = {
+            k: v.to(device) if hasattr(v, 'to') else v for k, v in attributes.items()
+        }
+        return type(self)(**new_attributes)
 
 
 @dataclass

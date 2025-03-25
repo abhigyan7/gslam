@@ -157,15 +157,26 @@ class Trajectory(torch.nn.Module):
             coeff_1 * diffs_R3[0] + coeff_2 * diffs_R3[1] + coeff_3 * diffs_R3[2]
         )
 
-        return ret_SO3.matrix(), ret_R3
+        return ret_SO3, ret_R3
 
     def angular_velocity(self, time: torch.Tensor):
         raise NotImplementedError()
 
+    def velocity(self, time: torch.Tensor, gravity: bool = False):
+        segment, t = self._parse_time(time)
+        coeff_1 = (3.0 - 6 * t + 3 * t * t) / 6.0
+        coeff_2 = (3 + 6 * t - 6 * t * t) / 6.0
+        coeff_3 = (3 * t * t) / 6.0
+
+        cps_R3 = self.cps_R3[segment - 1 : segment + 3]
+        diffs_R3 = [j - i for (i, j) in zip(cps_R3[:-1], cps_R3[1:])]
+        ret_R3 = coeff_1 * diffs_R3[0] + coeff_2 * diffs_R3[1] + coeff_3 * diffs_R3[2]
+        return ret_R3
+
     def acceleration(self, time: torch.Tensor, gravity: bool = False):
         segment, t = self._parse_time(time)
         coeff_1 = -1 + t
-        coeff_2 = t - 2 * t
+        coeff_2 = 1 - 2 * t
         coeff_3 = t
 
         cps_R3 = self.cps_R3[segment - 1 : segment + 3]

@@ -119,6 +119,10 @@ class TumRGB:
         self.tmpdir_object = tempfile.TemporaryDirectory()
         self.tmpdir = Path(self.tmpdir_object.name)
 
+        self.accel_frames = np.loadtxt(
+            self.sequence_dir / "accelerometer.txt", np.double
+        )[..., 1:]
+
     def __len__(self):
         return self.length
 
