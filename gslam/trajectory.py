@@ -113,6 +113,7 @@ class Trajectory(torch.nn.Module):
                 requires_grad=True,
             )
         )
+        self.gravity_alignment = pp.identity_Sim3(requires_grad=True)
 
     def _parse_time(self, time: torch.Tensor):
         segment = math.floor((time - self.starting_time) / self.interval)
@@ -129,27 +130,18 @@ class Trajectory(torch.nn.Module):
 
     def forward(self, time: torch.Tensor):
         segment, t = self._parse_time(time)
-        # print(f'{self.starting_time=} {self.interval=} {time=} {segment=} {t=}')
         coeff_1 = (5.0 + 3 * t - 3 * t * t + t * t * t) / 6.0
         coeff_2 = (1.0 + 3 * t + 3 * t * t - 2 * t * t * t) / 6.0
         coeff_3 = (t * t * t) / 6.0
 
-        # cps_SO3 = self.cps_SO3[segment-1:segment+3]
-        # diffs_so3 = [(i.Inv()@j).Log() for (i,j) in zip(cps_SO3[:-1], cps_SO3[1:])]
         cps_SO3 = pp.SO3(
             torch.stack([i.data for i in self.cps_SO3[segment - 1 : segment + 3]])
         )
         diffs_so3 = (cps_SO3[:-1].Inv() @ cps_SO3[1:]).Log()
         ret_SO3 = cps_SO3[0]
-        # ret_SO3 = ret_SO3 * (diffs_so3[0] * coeff_1).Exp()
-        # ret_SO3 = ret_SO3 * (diffs_so3[1] * coeff_2).Exp()
-        # ret_SO3 = ret_SO3 * (diffs_so3[2] * coeff_3).Exp()
-        ret_SO3 = (
-            ret_SO3
-            * (
-                diffs_so3[0] * coeff_1 + diffs_so3[1] * coeff_2 + diffs_so3[2] * coeff_3
-            ).Exp()
-        )
+        ret_SO3 = ret_SO3 * (diffs_so3[0] * coeff_1).Exp()
+        ret_SO3 = ret_SO3 * (diffs_so3[1] * coeff_2).Exp()
+        ret_SO3 = ret_SO3 * (diffs_so3[2] * coeff_3).Exp()
 
         cps_R3 = self.cps_R3[segment - 1 : segment + 3]
         diffs_R3 = [j - i for (i, j) in zip(cps_R3[:-1], cps_R3[1:])]
@@ -204,5 +196,5 @@ class Trajectory(torch.nn.Module):
         diffs_R3 = [j - i for (i, j) in zip(cps_R3[:-1], cps_R3[1:])]
         ret_R3 = coeff_1 * diffs_R3[0] + coeff_2 * diffs_R3[1] + coeff_3 * diffs_R3[2]
         if gravity:
-            ret_R3 += self.gravity_vector
+            ret_R3 += self.gravity_alignment * self.gravity_vector
         return ret_R3

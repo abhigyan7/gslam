@@ -9,6 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import rerun as rr
+import time
 
 # torch.set_default_device('cuda')
 
@@ -77,14 +78,14 @@ traj = Trajectory(0.13, 4.0)
 N = 100
 xyz = []
 
-rr.init('spline', recording_id='spline', spawn=True)
+rr.init('spline', recording_id=f'spline_{int(time.time())}', spawn=True)
 starting_time = None
 interval = None
 end_time = None
 for i in tqdm(range(0, len(dataset), 30)):
     frame = dataset[i]
     accel: np.ndarray = dataset.accel_frames[i]
-    mag = np.power(np.power(accel, 2.0).sum(), 0.5).item() - 9.8
+    mag = np.power(np.power(accel, 2.0).sum(), 0.5).item()
     rr.log(
         '/accel_gt',
         rr.Scalar(
@@ -99,7 +100,8 @@ for i in tqdm(range(0, len(dataset), 30)):
     SO3 = pp.mat2SO3(R)
     traj.cps_SO3.append(SO3.requires_grad_(True))
     traj.cps_R3.append(tx.requires_grad_(True))
-    log_pose(SO3, tx, True, i)
+    if i % 30 == 0:
+        log_pose(SO3, tx, True, i)
     xyz.append(tx)
     if starting_time is None:
         starting_time = f.timestamp
@@ -114,7 +116,7 @@ traj.starting_time = starting_time
 traj.interval = interval
 xyz = torch.stack(xyz)
 
-timestamps = np.linspace(starting_time, end_time, 3000)
+timestamps = np.linspace(starting_time, end_time - 2.0, 1000)
 interps = []
 with torch.no_grad():
     for t in tqdm(timestamps):
