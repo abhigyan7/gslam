@@ -98,10 +98,16 @@ def evaluate_trajectories(
 
 
 class Trajectory(torch.nn.Module):
-    def __init__(self, interval: float, starting_time: float, end_time: float = None):
+    def __init__(
+        self,
+        interval: float,
+        starting_time: float,
+        end_time: float = None,
+        num_cps: int = 4000,
+    ):
         super().__init__()
-        self.cps_SO3 = torch.nn.ParameterList()
-        self.cps_R3 = torch.nn.ParameterList()
+        self.cps_SO3 = pp.Parameter(pp.identity_SO3(num_cps, requires_grad=True))
+        self.cps_R3 = torch.nn.Parameter(torch.zeros([num_cps, 3], requires_grad=True))
         self.interval: float = interval
         self.starting_time: float = starting_time
         self.end_time: float = self.starting_time if end_time is None else end_time
@@ -114,6 +120,13 @@ class Trajectory(torch.nn.Module):
             )
         )
         self.gravity_alignment = pp.identity_Sim3(requires_grad=True)
+        self.cursor = 0
+
+    @torch.no_grad()
+    def add_control_point(self, new_SO3: pp.SO3, new_R3: torch.Tensor):
+        self.cps_SO3[self.cursor] = new_SO3
+        self.cps_R3[self.cursor] = new_R3
+        self.cursor += 1
 
     def _parse_time(self, time: torch.Tensor):
         segment = math.floor((time - self.starting_time) / self.interval)
@@ -134,9 +147,7 @@ class Trajectory(torch.nn.Module):
         coeff_2 = (1.0 + 3 * t + 3 * t * t - 2 * t * t * t) / 6.0
         coeff_3 = (t * t * t) / 6.0
 
-        cps_SO3 = pp.SO3(
-            torch.stack([i.data for i in self.cps_SO3[segment - 1 : segment + 3]])
-        )
+        cps_SO3 = self.cps_SO3[segment - 1 : segment + 3]
         diffs_so3 = (cps_SO3[:-1].Inv() @ cps_SO3[1:]).Log()
         ret_SO3 = cps_SO3[0]
         ret_SO3 = ret_SO3 * (diffs_so3[0] * coeff_1).Exp()
@@ -144,7 +155,7 @@ class Trajectory(torch.nn.Module):
         ret_SO3 = ret_SO3 * (diffs_so3[2] * coeff_3).Exp()
 
         cps_R3 = self.cps_R3[segment - 1 : segment + 3]
-        diffs_R3 = [j - i for (i, j) in zip(cps_R3[:-1], cps_R3[1:])]
+        diffs_R3 = cps_R3[1:] - cps_R3[:-1]
         ret_R3 = cps_R3[0] + (
             coeff_1 * diffs_R3[0] + coeff_2 * diffs_R3[1] + coeff_3 * diffs_R3[2]
         )
@@ -161,9 +172,7 @@ class Trajectory(torch.nn.Module):
         coeff_2 = (1.0 + 3 * t + 3 * t * t - 2 * t * t * t) / 6.0
         coeff_3 = (t * t * t) / 6.0
 
-        cps_SO3 = pp.SO3(
-            torch.stack([i.data for i in self.cps_SO3[segment - 1 : segment + 3]])
-        )
+        cps_SO3 = self.cps_SO3[segment - 1 : segment + 3]
         diffs_so3 = (cps_SO3[:-1].Inv() @ cps_SO3[1:]).Log()
         ret_se3 = (dot_coeff_1 * diffs_so3[0]).Exp() * (diffs_so3[0] * coeff_1)
         ret_se3 = (dot_coeff_2 * diffs_so3[1]).Exp() * ret_se3 + (
@@ -182,7 +191,7 @@ class Trajectory(torch.nn.Module):
         coeff_3 = (3 * t * t) / 6.0
 
         cps_R3 = self.cps_R3[segment - 1 : segment + 3]
-        diffs_R3 = [j - i for (i, j) in zip(cps_R3[:-1], cps_R3[1:])]
+        diffs_R3 = cps_R3[1:] - cps_R3[:-1]
         ret_R3 = coeff_1 * diffs_R3[0] + coeff_2 * diffs_R3[1] + coeff_3 * diffs_R3[2]
         return ret_R3
 
@@ -193,7 +202,7 @@ class Trajectory(torch.nn.Module):
         coeff_3 = t
 
         cps_R3 = self.cps_R3[segment - 1 : segment + 3]
-        diffs_R3 = [j - i for (i, j) in zip(cps_R3[:-1], cps_R3[1:])]
+        diffs_R3 = cps_R3[1:] - cps_R3[:-1]
         ret_R3 = coeff_1 * diffs_R3[0] + coeff_2 * diffs_R3[1] + coeff_3 * diffs_R3[2]
         if gravity:
             ret_R3 += self.gravity_alignment * self.gravity_vector

@@ -121,7 +121,8 @@ class TumRGB:
 
         self.accel_frames = np.loadtxt(
             self.sequence_dir / "accelerometer.txt", np.double
-        )[..., 1:]
+        )
+        self.accel_frames = self.accel_frames[..., 1:]
 
     def __len__(self):
         return self.length

@@ -49,31 +49,7 @@ def log_pose(r: pp.SO3_type, t: torch.Tensor, is_kf=False, i: int = 0):
     )
 
 
-traj = Trajectory(1.0, 0.0)
-
 dataset = TumRGB('/mnt/data/datasets/rgbd_dataset_freiburg1_room', 2500)
-
-traj.cps_SO3.append(pp.identity_SO3())
-traj.cps_SO3.append(pp.randn_SO3())
-traj.cps_SO3.append(pp.randn_SO3())
-traj.cps_SO3.append(pp.randn_SO3())
-traj.cps_SO3.append(pp.randn_SO3())
-
-traj.cps_R3.append(torch.tensor([0, 0, 1]).double().requires_grad_(True))
-traj.cps_R3.append(torch.tensor([1, 1, 1]).double().requires_grad_(True))
-traj.cps_R3.append(torch.tensor([2, 2, 1]).double().requires_grad_(True))
-traj.cps_R3.append(torch.tensor([3, 3, 1]).double().requires_grad_(True))
-traj.cps_R3.append(torch.tensor([4, 4, 1]).double().requires_grad_(True))
-
-# print(traj(-1.0))
-# print(traj(0.0))
-# print(traj(1.0))
-# print(traj(2.0))
-# print(traj(3.0))
-# print(traj(4.0))
-# print(traj(5.0))
-# print(traj(6.0))
-
 traj = Trajectory(0.13, 4.0)
 N = 100
 xyz = []
@@ -82,9 +58,11 @@ rr.init('spline', recording_id=f'spline_{int(time.time())}', spawn=True)
 starting_time = None
 interval = None
 end_time = None
-for i in tqdm(range(0, len(dataset), 30)):
+accel_frames: np.ndarray = dataset.accel_frames
+mean_accel = accel_frames.mean(axis=0)
+for i in tqdm(range(0, len(dataset) - 1000, 30)):
     frame = dataset[i]
-    accel: np.ndarray = dataset.accel_frames[i]
+    accel: np.ndarray = dataset.accel_frames[i] - mean_accel
     mag = np.power(np.power(accel, 2.0).sum(), 0.5).item()
     rr.log(
         '/accel_gt',
@@ -98,8 +76,7 @@ for i in tqdm(range(0, len(dataset), 30)):
     tx = pose[:3, 3]
     R = pose[:3, :3]
     SO3 = pp.mat2SO3(R)
-    traj.cps_SO3.append(SO3.requires_grad_(True))
-    traj.cps_R3.append(tx.requires_grad_(True))
+    traj.add_control_point(SO3.requires_grad_(True), tx.requires_grad_(True))
     if i % 30 == 0:
         log_pose(SO3, tx, True, i)
     xyz.append(tx)
@@ -116,7 +93,7 @@ traj.starting_time = starting_time
 traj.interval = interval
 xyz = torch.stack(xyz)
 
-timestamps = np.linspace(starting_time, end_time - 2.0, 1000)
+timestamps = np.linspace(starting_time, end_time - 2.0, 100)
 interps = []
 with torch.no_grad():
     for t in tqdm(timestamps):
