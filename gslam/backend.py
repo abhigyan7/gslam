@@ -269,6 +269,75 @@ class Backend(torch.multiprocessing.Process):
         window = [self.keyframes[i] for i in sorted(window)]
         return window
 
+    def initialize_map(self):
+        window = self.optimization_window()
+        params = [p for p in self.splats.parameters() if p.requires_grad]
+        cameras = [x.camera for x in window]
+        poses = torch.nn.ModuleList([x.pose for x in window])
+        gt_imgs = create_batch(window, lambda x: x.img)
+        exposure_params = create_batch(window, lambda x: x.exposure_params)
+        optimizer = torch.optim.LBFGS(
+            params,
+            # line_search_fn='strong_wolfe',
+            # max_iter=2000,
+        )
+        last_loss = None
+        n_iters = 0
+
+        def closure():
+            nonlocal n_iters, last_loss
+            n_iters += 1
+            if torch.is_grad_enabled():
+                optimizer.zero_grad()
+            outputs: RasterizationOutput = self.splats(
+                cameras, poses, render_depth=True
+            )
+
+            rendered_rgbs = outputs.rgbs * exposure_params[..., 0].view(
+                -1, 1, 1, 1
+            ).exp() + exposure_params[..., 1].view(-1, 1, 1, 1)
+
+            photometric_loss = (rendered_rgbs - gt_imgs).square().mean()
+            ssim_loss = 1.0 - fused_ssim(
+                outputs.rgbs.permute(0, 3, 1, 2),
+                gt_imgs.permute(0, 3, 1, 2),
+                padding='valid',
+            )
+            total_loss = (
+                1.0 - self.conf.ssim_weight
+            ) * photometric_loss + self.conf.ssim_weight * ssim_loss
+
+            if self.conf.use_gt_depths:
+                gt_depths = create_batch(window, lambda f: f.gt_depth)
+                depth_residual = outputs.depthmaps - gt_depths
+                depth_loss = (depth_residual[gt_depths > 0]).abs().mean()
+                total_loss += depth_loss * 0.1
+
+            if total_loss.requires_grad:
+                total_loss.backward()
+            # this sync is okay because lbfgs syncs anyway
+            last_loss = total_loss.item()
+            return total_loss
+
+        optimizer.step(closure)
+        last_kf = list(self.keyframes.values())[-1]
+
+        outputs = self.splats(
+            [last_kf.camera],
+            [last_kf.pose],
+            True,
+        )
+
+        # last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
+        last_kf.visible_gaussians = outputs.radii.sum(dim=0) > 0
+        self.last_outputs = outputs
+        self.last_kf_depthmap = outputs.depthmaps[0]
+        self.last_kf_rgbs = outputs.rgbs[0]
+
+        print(f'Map initialized in {n_iters} using L-BFGS')
+
+        return
+
     def optimize_map(self, n_iters: int = None, prune=True, regularize=True):
         if n_iters is None:
             n_iters = self.conf.num_iters_mapping
@@ -295,7 +364,7 @@ class Backend(torch.multiprocessing.Process):
 
             rendered_rgbs = outputs.rgbs * exposure_params[..., 0].view(
                 -1, 1, 1, 1
-            ) + exposure_params[..., 1].view(-1, 1, 1, 1)
+            ).exp() + exposure_params[..., 1].view(-1, 1, 1, 1)
 
             if self.conf.active_gs:
                 photometric_loss = (rendered_rgbs - gt_imgs).square().sum(dim=-1)
@@ -317,11 +386,12 @@ class Backend(torch.multiprocessing.Process):
             isotropic_loss = (
                 (self.splats.scales.exp()[visible_gaussians] - mean_scales).abs().sum()
             )
-            depth_regularization_loss = edge_aware_tv(
-                outputs.depthmaps,
-                outputs.rgbs,
-                outputs.alphas[..., 0] > 0.4,
-            )
+            if not self.conf.use_gt_depths:
+                depth_regularization_loss = edge_aware_tv(
+                    outputs.depthmaps,
+                    outputs.rgbs,
+                    outputs.alphas[..., 0] > 0.4,
+                )
             ssim_loss = 1.0 - fused_ssim(
                 outputs.rgbs.permute(0, 3, 1, 2),
                 gt_imgs.permute(0, 3, 1, 2),
@@ -333,9 +403,11 @@ class Backend(torch.multiprocessing.Process):
                 + self.conf.isotropic_regularization_weight * isotropic_loss
             )
             if regularize:
-                total_loss += (
-                    +self.conf.depth_regularization_weight * depth_regularization_loss
-                )
+                if not self.conf.use_gt_depths:
+                    total_loss += (
+                        +self.conf.depth_regularization_weight
+                        * depth_regularization_loss
+                    )
 
             if self.conf.use_gt_depths:
                 gt_depths = create_batch(window, lambda f: f.gt_depth)
@@ -362,6 +434,7 @@ class Backend(torch.multiprocessing.Process):
                 f"loss={total_loss.item():.5f}, "
                 f"n_splats={self.splats.means.shape[0]:07}, "
                 f"mean_beta={self.splats.log_uncertainties.exp().mean().item():.3f}"
+                f"window: {len(window)}"
             )
             pbar.set_description(desc)
 
@@ -790,11 +863,7 @@ class Backend(torch.multiprocessing.Process):
                     self.pause_map_optim = False
                     self.initialize(frame)
                     with self.splats_mutex:
-                        self.optimize_map(
-                            self.conf.num_iters_initialization,
-                            prune=True,
-                            regularize=False,
-                        )
+                        self.initialize_map()
                     self.sync()
                     continue
                 case None:

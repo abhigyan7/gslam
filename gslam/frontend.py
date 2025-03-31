@@ -359,27 +359,27 @@ class Frontend(mp.Process):
                 [f.pose],
                 render_depth=True,
             )
-            torch_to_pil(outputs.rgbs[0]).save(
-                self.output_dir / f'final_renders/{i:08}.jpg'
-            )
+
+            rgb_np = torch_image_to_np(outputs.rgbs[0])
             false_colormap(
                 outputs.depthmaps[0],
                 near=0.0,
                 far=2.0,
             ).save(self.output_dir / f'final_depths/{i:08}.jpg')
+            Image.fromarray(rgb_np).save(self.output_dir / f'final_renders/{i:08}.jpg')
 
             if f.img_file is None:
                 continue
             gt_img = np.array(Image.open(f.img_file))
             psnrs.append(
                 psnr(
-                    torch_image_to_np(outputs.rgbs[0]),
+                    rgb_np,
                     gt_img,
                 )
             )
             ssims.append(
                 ssim(
-                    torch_image_to_np(outputs.rgbs[0]),
+                    rgb_np,
                     gt_img,
                     channel_axis=2,
                 )
@@ -670,13 +670,14 @@ class Frontend(mp.Process):
             params.append(new_frame.exposure_params)
         optimizer = torch.optim.LBFGS(
             params,
-            history_size=4,
+            history_size=10,
             line_search_fn='strong_wolfe',
-            tolerance_change=1e-5,
+            tolerance_change=1e-6,
         )
+        last_loss = None
 
         def closure():
-            nonlocal n_iters
+            nonlocal n_iters, last_loss
             n_iters += 1
             if torch.is_grad_enabled():
                 optimizer.zero_grad()
@@ -698,11 +699,12 @@ class Frontend(mp.Process):
             )
             if loss.requires_grad:
                 loss.backward()
+            # this sync is okay because lbfgs syncs anyway
+            last_loss = loss.item()
             return loss
 
         optimizer.step(closure)
-        loss = closure().item()
         print(
-            f'LBFGS: {new_frame.index} {loss=} {n_iters=}, Exposure Params: {new_frame.exposure_params.data}'
+            f'LBFGS: {new_frame.index} {last_loss=} {n_iters=}, Exposure Params: {new_frame.exposure_params.data}'
         )
-        return loss
+        return last_loss
