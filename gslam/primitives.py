@@ -438,6 +438,21 @@ class IMUFrame:
 
 
 @dataclass
+class DepthFrame:
+    depthmap: torch.Tensor
+    camera: Camera
+    timestamp: float
+    index: int
+
+    def to(self, device):
+        attributes = vars(self)
+        new_attributes = {
+            k: v.to(device) if hasattr(v, 'to') else v for k, v in attributes.items()
+        }
+        return type(self)(**new_attributes)
+
+
+@dataclass
 class Events:
     backend_done: Event
     frontend_done: Event

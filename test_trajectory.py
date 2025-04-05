@@ -93,7 +93,7 @@ traj.starting_time = starting_time
 traj.interval = interval
 xyz = torch.stack(xyz)
 
-timestamps = np.linspace(starting_time, end_time - 2.0, 100)
+timestamps = np.linspace(starting_time, end_time - 2.0, 1000)
 interps = []
 with torch.no_grad():
     for t in tqdm(timestamps):

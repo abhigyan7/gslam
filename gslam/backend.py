@@ -95,7 +95,7 @@ class MapConfig:
 
     kf_cov: float = 0.9
     kf_oc: float = 0.99
-    kf_m: float = 0.2  # 0.3
+    kf_m: float = 0.15
     kf_cos: float = math.cos(math.pi / 30)
 
     use_gt_depths: bool = False
@@ -230,8 +230,12 @@ class Backend(torch.multiprocessing.Process):
             window = set()
             window.add(latest_keyframe)
             neighbors = self.pose_graph[latest_keyframe]
-            if 0 > len(neighbors) > window_size_total:
-                window.update(random.sample(neighbors, window_size_total))
+            if 0 < len(neighbors) < window_size_total:
+                window.update(
+                    random.sample(
+                        sorted(neighbors), min(len(neighbors), window_size_total)
+                    )
+                )
             elif 0 < len(neighbors):
                 window.update(list(neighbors))
             spots_left_in_window = window_size_total - len(window)
@@ -281,43 +285,23 @@ class Backend(torch.multiprocessing.Process):
             # line_search_fn='strong_wolfe',
             # max_iter=2000,
         )
-        last_loss = None
         n_iters = 0
 
         def closure():
-            nonlocal n_iters, last_loss
+            nonlocal n_iters
             n_iters += 1
             if torch.is_grad_enabled():
                 optimizer.zero_grad()
             outputs: RasterizationOutput = self.splats(
                 cameras, poses, render_depth=True
             )
-
             rendered_rgbs = outputs.rgbs * exposure_params[..., 0].view(
                 -1, 1, 1, 1
             ).exp() + exposure_params[..., 1].view(-1, 1, 1, 1)
-
             photometric_loss = (rendered_rgbs - gt_imgs).square().mean()
-            ssim_loss = 1.0 - fused_ssim(
-                outputs.rgbs.permute(0, 3, 1, 2),
-                gt_imgs.permute(0, 3, 1, 2),
-                padding='valid',
-            )
-            total_loss = (
-                1.0 - self.conf.ssim_weight
-            ) * photometric_loss + self.conf.ssim_weight * ssim_loss
-
-            if self.conf.use_gt_depths:
-                gt_depths = create_batch(window, lambda f: f.gt_depth)
-                depth_residual = outputs.depthmaps - gt_depths
-                depth_loss = (depth_residual[gt_depths > 0]).abs().mean()
-                total_loss += depth_loss * 0.1
-
-            if total_loss.requires_grad:
-                total_loss.backward()
-            # this sync is okay because lbfgs syncs anyway
-            last_loss = total_loss.item()
-            return total_loss
+            if photometric_loss.requires_grad:
+                photometric_loss.backward()
+            return photometric_loss
 
         optimizer.step(closure)
         last_kf = list(self.keyframes.values())[-1]
@@ -328,7 +312,6 @@ class Backend(torch.multiprocessing.Process):
             True,
         )
 
-        # last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
         last_kf.visible_gaussians = outputs.radii.sum(dim=0) > 0
         self.last_outputs = outputs
         self.last_kf_depthmap = outputs.depthmaps[0]
@@ -498,53 +481,217 @@ class Backend(torch.multiprocessing.Process):
 
         return
 
-    def optimize_final(self):
-        n_iters = self.conf.num_iters_final
+    def optimize_map_sgd(self, n_iters: int = None, regularize=True):
+        if n_iters is None:
+            n_iters = self.conf.num_iters_mapping
 
         for step in (pbar := tqdm.trange(n_iters)):
-            window = random.sample(
-                sorted(self.keyframes.keys()), min(10, len(self.keyframes))
-            )
-            window = [self.keyframes[i] for i in window]
+            self.total_step += 1
+            window = self.optimization_window()
             cameras = [x.camera for x in window]
             poses = torch.nn.ModuleList([x.pose for x in window])
             gt_imgs = create_batch(window, lambda x: x.img)
+            exposure_params = create_batch(window, lambda x: x.exposure_params)
+            self.zero_grad_all_optimizers()
 
-            cameras = [x.camera for x in window]
-            poses = torch.nn.ModuleList([x.pose for x in window])
-            gt_imgs = create_batch(window, lambda x: x.img)
-
-            for optimizer in self.splat_optimizers.values():
-                optimizer.zero_grad()
-
-            outputs = self.splats(
+            outputs: RasterizationOutput = self.splats(
                 cameras,
                 poses,
+                render_depth=True,
             )
 
-            photometric_loss = (outputs.rgbs - gt_imgs).square().mean()
+            rendered_rgbs = outputs.rgbs * exposure_params[..., 0].view(
+                -1, 1, 1, 1
+            ).exp() + exposure_params[..., 1].view(-1, 1, 1, 1)
+
+            if self.conf.active_gs:
+                photometric_loss = (rendered_rgbs - gt_imgs).square().sum(dim=-1)
+                photometric_loss = photometric_loss / (2 * outputs.betas.square())
+                photometric_loss = photometric_loss.mean()
+                photometric_loss = (
+                    photometric_loss + (outputs.betas.log().square() * 0.5).mean()
+                )
+            else:
+                photometric_loss = (outputs.rgbs - gt_imgs).square().mean()
+
+            visible_gaussians = outputs.radii.sum(dim=0) > 0
+            mean_scales = (
+                self.splats.scales[visible_gaussians]
+                .mean(dim=1, keepdim=True)
+                .exp()
+                .detach()
+            )
+            isotropic_loss = (
+                (self.splats.scales.exp()[visible_gaussians] - mean_scales).abs().sum()
+            )
+            if not self.conf.use_gt_depths:
+                depth_regularization_loss = edge_aware_tv(
+                    outputs.depthmaps,
+                    outputs.rgbs,
+                    outputs.alphas[..., 0] > 0.4,
+                )
             ssim_loss = 1.0 - fused_ssim(
                 outputs.rgbs.permute(0, 3, 1, 2),
                 gt_imgs.permute(0, 3, 1, 2),
                 padding='valid',
             )
-            loss = (
-                self.conf.ssim_weight * ssim_loss
-                + (1.0 - self.conf.ssim_weight) * photometric_loss
+            total_loss = (
+                (1.0 - self.conf.ssim_weight) * photometric_loss
+                + self.conf.ssim_weight * ssim_loss
+                + self.conf.isotropic_regularization_weight * isotropic_loss
             )
+            if regularize:
+                if not self.conf.use_gt_depths:
+                    total_loss += (
+                        +self.conf.depth_regularization_weight
+                        * depth_regularization_loss
+                    )
 
-            loss.backward()
+            if self.conf.use_gt_depths:
+                gt_depths = create_batch(window, lambda f: f.gt_depth)
+                depth_residual = outputs.depthmaps - gt_depths
+                depth_loss = (depth_residual[gt_depths > 0]).abs().mean()
+                total_loss += depth_loss * 0.1
+
+            outputs.means2d.retain_grad()
+
+            total_loss.backward()
+
+            if (self.total_step % 100) == 0:
+                self.insertion_3dgs.step(
+                    self.splats,
+                    self.splat_optimizers,
+                    outputs,
+                    None,
+                    None,
+                )
 
             desc = (
-                f"[Final Optimization] loss={loss.item():.3f}, "
-                f"n_splats={self.splats.means.shape[0]:07}"
+                f"[Mapping] keyframe {len(self.keyframes)} pm={photometric_loss.item():.4f}, "
+                f"loss={total_loss.item():.5f}, "
+                f"n_splats={self.splats.means.shape[0]:07}, "
+                f"mean_beta={self.splats.log_uncertainties.exp().mean().item():.3f}"
+                f"window: {len(window)}"
             )
             pbar.set_description(desc)
 
-            for optimizer in self.splat_optimizers.values():
-                optimizer.step()
+            self.step_all_optimizers()
+
+            with torch.no_grad():
+                self.splats.opacities.data[(outputs.radii > 0).sum(dim=0) > 1] *= (
+                    self.conf.opacity_decay
+                )
+
+        for f, d in zip(window, outputs.depthmaps):
+            f.est_depths = d.detach().clone()
+
+        last_kf = list(self.keyframes.values())[-1]
+
+        outputs = self.splats(
+            [last_kf.camera],
+            [last_kf.pose],
+            True,
+        )
+
+        # last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
+        last_kf.visible_gaussians = outputs.radii.sum(dim=0) > 0
+        self.last_outputs = outputs
+        self.last_kf_depthmap = outputs.depthmaps[0]
+        self.last_kf_rgbs = outputs.rgbs[0]
 
         return
+
+    def run_pruning(self):
+        last_kf = list(self.keyframes.values())[-1]
+        outputs = self.splats(
+            [last_kf.camera],
+            [last_kf.pose],
+            True,
+        )
+        gaussians_max_screen_size = torch.max(outputs.radii, axis=0).values
+        remove_mask = torch.zeros(
+            (self.splats.means.shape[0]), dtype=torch.bool, device=self.conf.device
+        )
+        if self.conf.enable_visibility_pruning and (len(self.keyframes) >= 2):
+            radii = outputs.radii[: self.conf.optim_window_last_n_keyframes]
+            n_touched = outputs.n_touched[: self.conf.optim_window_last_n_keyframes]
+            remove_mask = remove_mask | self.pruning_conditioning.step(
+                self.splats, self.splat_optimizers, radii, n_touched
+            )
+        # size pruning
+        remove_mask = remove_mask | self.pruning_size.step(
+            self.splats,
+            self.splat_optimizers,
+            gaussians_max_screen_size,
+        )
+        # opacity pruning
+        remove_mask = remove_mask | self.pruning_opacity.step(
+            self.splats,
+            self.splat_optimizers,
+        )
+        prune_using_mask(self.splats, self.splat_optimizers, ~remove_mask)
+        return
+
+    def optimize_poses_lbfgs(self):
+        n_iters = 0
+        last_loss = None
+
+        window = self.optimization_window()
+        cameras = [x.camera for x in window]
+        poses = torch.nn.ModuleList([x.pose for x in window])
+        gt_imgs = create_batch(window, lambda x: x.img)
+        exposure_params = create_batch(window, lambda x: x.exposure_params)
+
+        # make sure the first frame's pose is fixed
+        params = []
+        for x in window:
+            if x.index == 0:
+                continue
+            params.extend(list(x.pose.parameters()))
+        # if exposure_params.requires_grad:
+        #     params.append(exposure_params)
+        optimizer = torch.optim.LBFGS(
+            params,
+            history_size=10,
+            line_search_fn='strong_wolfe',
+            tolerance_change=1e-6,
+        )
+
+        def closure():
+            nonlocal n_iters, last_loss
+            n_iters += 1
+            if torch.is_grad_enabled():
+                optimizer.zero_grad()
+
+            outputs: RasterizationOutput = self.splats(
+                cameras,
+                poses,
+                render_depth=True,
+            )
+
+            rendered_rgbs = outputs.rgbs * exposure_params[..., 0].view(
+                -1, 1, 1, 1
+            ).exp() + exposure_params[..., 1].view(-1, 1, 1, 1)
+
+            if self.conf.active_gs:
+                photometric_loss = (rendered_rgbs - gt_imgs).square().sum(dim=-1)
+                photometric_loss = photometric_loss / (2 * outputs.betas.square())
+                photometric_loss = photometric_loss.mean()
+                photometric_loss = (
+                    photometric_loss + (outputs.betas.log().square() * 0.5).mean()
+                )
+            else:
+                photometric_loss = (outputs.rgbs - gt_imgs).square().mean()
+
+            if photometric_loss.requires_grad:
+                photometric_loss.backward()
+            # this sync is okay because lbfgs syncs anyway
+            last_loss = photometric_loss.item()
+            return photometric_loss
+
+        optimizer.step(closure)
+        print('Pose Optimization: L-BFGS')
+        return last_loss
 
     def sync(self):
         self.frontend_queue.put(
@@ -803,13 +950,14 @@ class Backend(torch.multiprocessing.Process):
         translation = pose_difference[:3, 3].pow(2.0).sum().pow(0.5).item()
         median_depth = outputs.depthmaps[outputs.alphas[..., 0] > 0.1].median()
         if translation > self.conf.kf_m * median_depth:
+            print(f"Added keyframe: {translation=}>{self.conf.kf_m=}*{median_depth=}")
             return True
 
         cosine_sim = torch.nn.functional.cosine_similarity(
             new_frame.pose()[:3, 2], previous_keyframe.pose()[:3, 2], dim=0
         )
         if cosine_sim < self.conf.kf_cos:
-            print(f"Added keyframe: rotation-{torch.acos(cosine_sim)*180/torch.pi}\n")
+            print(f"Added keyframe: rotation={torch.acos(cosine_sim)*180/torch.pi}\n")
             return True
         return False
 
@@ -831,7 +979,10 @@ class Backend(torch.multiprocessing.Process):
                     time.sleep(0.03)
                     continue
                 with self.splats_mutex:
-                    self.optimize_map()
+                    self.optimize_map_sgd()
+                    if len(self.keyframes) > 1:
+                        self.run_pruning()
+                        self.optimize_poses_lbfgs()
             match self.queue.get():
                 case [FrontendMessage.ADD_REFINED_DEPTHMAP, _depth, _frame_idx]:
                     raise NotImplementedError()

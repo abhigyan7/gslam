@@ -9,7 +9,11 @@ from torch.multiprocessing import JoinableQueue, Process
 from threading import Event
 import cv2
 
-from .primitives import Camera, Frame, PoseZhou as Pose
+from typing import assert_never
+
+from enum import StrEnum, auto
+
+from .primitives import Camera, Frame, PoseZhou as Pose, IMUFrame, DepthFrame
 
 import os
 
@@ -28,6 +32,12 @@ tum_intrinsics_params = {
     ],
     "freiburg3": [535.4, 539.2, 320.1, 247.6, 0, 0, 0, 0, 0],
 }
+
+
+class SensorTypes(StrEnum):
+    IMU = auto()
+    RGB = auto()
+    Depth = auto()
 
 
 class TumRGB:
@@ -253,8 +263,169 @@ class RGBSensorStream(Process):
         return
 
 
+class TumAsync:
+    def __init__(self, sequence_dir: Path):
+        self.sequence_dir = Path(sequence_dir)
+        self.num_frames = 0
+
+        rgb_frames_file = self.sequence_dir / "rgb.txt"
+        if rgb_frames_file.exists() and rgb_frames_file.is_file():
+            rgb_frames = np.loadtxt(rgb_frames_file, np.str_)
+            self.rgb_frame_timestamps = rgb_frames[:, 0].astype(np.float64)
+            self.rgb_frame_filenames = rgb_frames[:, 1].astype(np.str_)
+            self.num_frames += len(rgb_frames)
+
+        depth_frames_file = self.sequence_dir / "depth.txt"
+        if depth_frames_file.exists() and depth_frames_file.is_file():
+            depth_frames = np.loadtxt(depth_frames_file, np.str_)
+            self.depth_frame_timestamps = depth_frames[:, 0].astype(np.float64)
+            self.depth_frame_filenames = depth_frames[:, 1].astype(np.str_)
+            self.num_frames += len(self.depth_frame_timestamps)
+
+        accel_frames_file = self.sequence_dir / "accelerometer.txt"
+        if accel_frames_file.exists() and accel_frames_file.is_file():
+            accel_frames = np.loadtxt(accel_frames_file, np.double)
+            self.accel_frames = accel_frames[..., 1:]
+            self.accel_timestamps = accel_frames[..., 0]
+            self.num_frames += len(accel_frames)
+
+        ground_truth_file = self.sequence_dir / "groundtruth.txt"
+        ground_truth_frames = np.loadtxt(ground_truth_file, np.double)
+        self.gt_timestamps = ground_truth_frames[:, 0].astype(np.float64)
+        gt_poses = ground_truth_frames[:, 1:].astype(np.float64)
+
+        gt_translations = gt_poses[:, :3]
+        gt_quaternions = gt_poses[:, 3:]
+        # tum is xyzw, pyquaternion is wxyz
+        gt_quaternions = np.roll(gt_quaternions, 1, axis=1)
+        gt_rotation_matrices = np.array(
+            [Quaternion(*q).rotation_matrix for q in gt_quaternions]
+        )
+
+        self.poses = np.tile(np.eye(4, dtype=np.float64), [len(gt_translations), 1, 1])
+        self.poses[..., :3, :3] = gt_rotation_matrices
+        self.poses[..., :3, 3] = gt_translations
+
+        sequence_type = str(self.sequence_dir.parts[-1]).split('_')[2]
+        fx, fy, cx, cy, *d = tum_intrinsics_params[sequence_type]
+        K = np.array(
+            [
+                [fx, 0, cx],
+                [0, fy, cy],
+                [0, 0, 1],
+            ],
+            dtype=np.float32,
+        )
+        self.Ks, self.roi = cv2.getOptimalNewCameraMatrix(
+            K, np.array(d), (640, 480), 0, (640, 480)
+        )
+        self.undistort_map_x, self.undistort_map_y = cv2.initUndistortRectifyMap(
+            K,
+            np.array(d),
+            None,
+            self.Ks,
+            (640, 480),
+            cv2.CV_32FC1,
+        )
+        self.Ks = torch.tensor(self.Ks).cuda()
+
+        # we need to hold on to this because once this is gc'd
+        # python deletes the tmpdir
+        self.tmpdir_object = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self.tmpdir_object.name)
+
+        # sort the frames by timestamp
+        imu_timestamps = [
+            (SensorTypes.IMU, idx, ts) for (idx, ts) in enumerate(self.accel_timestamps)
+        ]
+        rgb_timestamps = [
+            (SensorTypes.RGB, idx, ts)
+            for (idx, ts) in enumerate(self.rgb_frame_timestamps)
+        ]
+        depth_timestamps = [
+            (SensorTypes.Depth, idx, ts)
+            for (idx, ts) in enumerate(self.depth_frame_timestamps)
+        ]
+
+        all_timestamps = imu_timestamps + rgb_timestamps + depth_timestamps
+
+        self.sorted_timestamps = sorted(all_timestamps, key=lambda x: x[-1])
+
+    def __len__(self):
+        return self.num_frames
+
+    def __getitem__(self, idx):
+        if idx >= len(self):
+            raise StopIteration
+        sensor_type, idx, ts = self.sorted_timestamps[idx]
+
+        if sensor_type == SensorTypes.RGB:
+            rgb_filename = self.sequence_dir / self.rgb_frame_filenames[idx]
+            im = Image.open(rgb_filename)
+            image = cv2.remap(
+                np.array(im),
+                self.undistort_map_x,
+                self.undistort_map_y,
+                cv2.INTER_LINEAR,
+            )
+            x, y, w, h = self.roi
+            image = image[y : y + h, x : x + w]
+
+            # save undistorted gt_img to tmp because we'll need it to evaluate reconstruction later
+            gt_img_save_path = self.tmpdir / rgb_filename.parts[-1]
+            cv2.imwrite(str(gt_img_save_path), image[..., ::-1])
+            image = np.asarray(np.float32(image)) / 255.0
+            image = torch.Tensor(image).cuda()
+            height, width, _channels = image.shape
+
+            gt_pose = torch.Tensor(self.poses[idx, ...])
+            camera = Camera(self.Ks.clone(), height, width)
+            frame = Frame(
+                image,
+                ts,
+                camera,
+                Pose(),
+                gt_pose,
+                gt_depth=None,
+                img_file=gt_img_save_path,
+                index=idx,
+            )
+            return (SensorTypes.RGB, frame)
+
+        if sensor_type == SensorTypes.Depth:
+            depth_filename = self.sequence_dir / self.depth_frame_filenames[idx]
+            depth_im = Image.open(depth_filename)
+            depth_image = np.asarray(depth_im)
+            x, y, w, h = self.roi
+            depth_image = depth_image[y : y + h, x : x + w]
+            depth_image = torch.Tensor(depth_image.copy()).cuda() / 5000.0
+            height, width = depth_image.shape
+
+            gt_pose = torch.Tensor(self.poses[idx, ...])
+            camera = Camera(self.Ks.clone(), height, width)
+            frame = DepthFrame(
+                depth_image,
+                camera,
+                ts,
+                index=idx,
+            )
+            return (SensorTypes.Depth, frame)
+
+        if sensor_type == SensorTypes.IMU:
+            accel_val = self.accel_frames[idx]
+            frame = IMUFrame(
+                accel=torch.Tensor(accel_val).cuda(),
+                gyro=None,
+                timestamp=ts,
+                index=idx,
+            )
+            return (SensorTypes.IMU, frame)
+
+        assert_never(sensor_type)
+
+
 if __name__ == "__main__":
-    td = TumRGB("/home/abhigyan/gslam/datasets/tum/rgbd_dataset_freiburg1_desk")
+    td = TumAsync("/home/abhigyan/gslam/datasets/tum/rgbd_dataset_freiburg1_desk")
     print(td[0])
     print(td[1])
 

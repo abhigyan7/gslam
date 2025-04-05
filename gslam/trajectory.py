@@ -204,6 +204,8 @@ class Trajectory(torch.nn.Module):
         cps_R3 = self.cps_R3[segment - 1 : segment + 3]
         diffs_R3 = cps_R3[1:] - cps_R3[:-1]
         ret_R3 = coeff_1 * diffs_R3[0] + coeff_2 * diffs_R3[1] + coeff_3 * diffs_R3[2]
+        SO3, _R3 = self.forward(time)
+        ret_R3 = SO3 * ret_R3
         if gravity:
             ret_R3 += self.gravity_alignment * self.gravity_vector
         return ret_R3
