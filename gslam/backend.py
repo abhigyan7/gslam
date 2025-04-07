@@ -570,7 +570,7 @@ class Backend(torch.multiprocessing.Process):
                 f"[Mapping] keyframe {len(self.keyframes)} pm={photometric_loss.item():.4f}, "
                 f"loss={total_loss.item():.5f}, "
                 f"n_splats={self.splats.means.shape[0]:07}, "
-                f"mean_beta={self.splats.log_uncertainties.exp().mean().item():.3f}"
+                f"mean_beta={self.splats.log_uncertainties.exp().mean().item():.3f}, "
                 f"window: {len(window)}"
             )
             pbar.set_description(desc)
@@ -914,12 +914,6 @@ class Backend(torch.multiprocessing.Process):
             render_depth=True,
         )
 
-        _photometric_error = (outputs.rgbs[0] - new_frame.img).square().mean()
-        # TODO parameterize this
-        # TODO this isn't kicking in
-        # if photometric_error.item() > 0.15:
-        #   return True
-
         new_frame.visible_gaussians = outputs.radii[0] > 0
         previous_keyframe.visible_gaussians = outputs.radii[1] > 0
 
@@ -1014,7 +1008,12 @@ class Backend(torch.multiprocessing.Process):
                     self.pause_map_optim = False
                     self.initialize(frame)
                     with self.splats_mutex:
-                        self.initialize_map()
+                        self.optimize_map(
+                            self.conf.num_iters_initialization,
+                            prune=True,
+                            regularize=False,
+                        )
+                        # self.initialize_map()
                     self.sync()
                     continue
                 case None:

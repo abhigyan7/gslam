@@ -664,13 +664,14 @@ class Frontend(mp.Process):
         return loss
 
     def igs_track_lbfgs(self, new_frame: Frame, n_iters, optimizer, scheduler):
+        start_time = time.time()
         n_iters = 0
         params = list(new_frame.pose.parameters())
         if self.conf.learn_exposure_params:
             params.append(new_frame.exposure_params)
         optimizer = torch.optim.LBFGS(
             params,
-            history_size=10,
+            history_size=5,
             line_search_fn='strong_wolfe',
             tolerance_change=1e-6,
         )
@@ -705,6 +706,6 @@ class Frontend(mp.Process):
 
         optimizer.step(closure)
         print(
-            f'LBFGS: {new_frame.index} {last_loss=} {n_iters=}, Exposure Params: {new_frame.exposure_params.data}'
+            f'LBFGS: {new_frame.index} {last_loss=} {n_iters=}, time: {((time.time() - start_time)*1000.0):.1f}ms'
         )
         return last_loss

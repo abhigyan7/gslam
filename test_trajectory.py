@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 from gslam.trajectory import Trajectory
-from gslam.data import TumRGB
-from gslam.primitives import Frame
+from gslam.data import TumAsync, SensorTypes
+from gslam.primitives import IMUFrame
 import pypose as pp
 import torch
 import numpy as np
@@ -11,7 +11,8 @@ from tqdm import tqdm
 import rerun as rr
 import time
 
-# torch.set_default_device('cuda')
+torch.set_default_device('cuda')
+# torch.autograd.set_detect_anomaly(True)
 
 
 def plot_points(pts):
@@ -49,54 +50,48 @@ def log_pose(r: pp.SO3_type, t: torch.Tensor, is_kf=False, i: int = 0):
     )
 
 
-dataset = TumRGB('/mnt/data/datasets/rgbd_dataset_freiburg1_room', 2500)
-traj = Trajectory(0.13, 4.0)
-N = 100
-xyz = []
-
 rr.init('spline', recording_id=f'spline_{int(time.time())}', spawn=True)
-starting_time = None
-interval = None
-end_time = None
-accel_frames: np.ndarray = dataset.accel_frames
-mean_accel = accel_frames.mean(axis=0)
-for i in tqdm(range(0, len(dataset) - 1000, 30)):
-    frame = dataset[i]
-    accel: np.ndarray = dataset.accel_frames[i] - mean_accel
-    mag = np.power(np.power(accel, 2.0).sum(), 0.5).item()
-    rr.log(
-        '/accel_gt',
-        rr.Scalar(
-            mag,
-        ),
-    )
 
-    f: Frame = frame.to('cpu')
-    pose = f.gt_pose
-    tx = pose[:3, 3]
-    R = pose[:3, :3]
-    SO3 = pp.mat2SO3(R)
-    traj.add_control_point(SO3.requires_grad_(True), tx.requires_grad_(True))
-    if i % 30 == 0:
-        log_pose(SO3, tx, True, i)
-    xyz.append(tx)
-    if starting_time is None:
-        starting_time = f.timestamp
-    elif interval is None:
-        interval = f.timestamp - starting_time
-    end_time = f.timestamp
+dataset = TumAsync('/mnt/data/datasets/rgbd_dataset_freiburg1_room')
+traj = Trajectory(0.25, dataset.gt_timestamps[0])
+
+timestamps = []
+for gt_pose in dataset.poses[::10]:
+    tx = torch.from_numpy(gt_pose[:3, 3]).requires_grad_(True).detach()
+    R = gt_pose[:3, :3]
+    SO3 = pp.mat2SO3(R).requires_grad_(True).detach()
+    traj.add_control_point(SO3, tx)
+timestamps.extend(dataset.gt_timestamps[::10])
+
+optimizer = torch.optim.Adam(traj.parameters())
+starting_time = None
+end_time = None
+
+for j in tqdm(range(100)):
+    for i in tqdm(range(0, 1000, 10), leave=False):
+        sensor_type, frame = dataset[i]
+        if sensor_type == SensorTypes.IMU:
+            frame: IMUFrame = frame
+            gt_accel = frame.accel
+            observed_accel = traj.acceleration(frame.timestamp, gravity=True)
+            loss = (gt_accel - observed_accel).square().sum()
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            if starting_time is None:
+                starting_time = frame.timestamp
+            end_time = frame.timestamp
 
 print(traj)
-print(starting_time)
-print(interval)
-traj.starting_time = starting_time
-traj.interval = interval
-xyz = torch.stack(xyz)
 
-timestamps = np.linspace(starting_time, end_time - 2.0, 1000)
+timestamps = np.linspace(
+    traj.starting_time, traj.starting_time + traj.interval * len(traj.cps_SO3), 100
+)
+timestamps = np.linspace(starting_time, end_time, 100)
+timestamps = np.array(timestamps)
 interps = []
 with torch.no_grad():
-    for t in tqdm(timestamps):
+    for i, t in tqdm(enumerate(timestamps), leave=False):
         rot_q, translation = traj(t.item())
         vel = traj.velocity(t.item())
         mag = vel.square().sum().sqrt().item()
@@ -106,10 +101,17 @@ with torch.no_grad():
                 mag,
             ),
         )
-        accel = traj.acceleration(t.item())
+        accel = traj.acceleration(t.item(), gravity=True)
         mag = accel.square().sum().sqrt().item()
         rr.log(
             '/accel',
+            rr.Scalar(
+                mag,
+            ),
+        )
+        mag = torch.tensor(dataset.accel_frames[i]).square().sum().sqrt().item()
+        rr.log(
+            '/accel_gt',
             rr.Scalar(
                 mag,
             ),
@@ -119,7 +121,7 @@ with torch.no_grad():
 
 interps = torch.stack(interps)
 
-plot_points(xyz)
-plt.savefig('test.png')
-plot_points(interps)
+# plot_points(xyz)
+# plt.savefig('test.png')
+plot_points(interps.detach().cpu())
 plt.savefig('test_interps.png')

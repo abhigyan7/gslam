@@ -207,5 +207,5 @@ class Trajectory(torch.nn.Module):
         SO3, _R3 = self.forward(time)
         ret_R3 = SO3 * ret_R3
         if gravity:
-            ret_R3 += self.gravity_alignment * self.gravity_vector
+            ret_R3 = ret_R3 + self.gravity_alignment * self.gravity_vector
         return ret_R3
