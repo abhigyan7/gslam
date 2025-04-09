@@ -47,6 +47,32 @@ class GaussianSplattingData(torch.nn.Module):
             torch.tensor([0.0, 0.0, 0.0], device=self.means.device).float(),
         )
 
+    def render(
+        self,
+        cameras: List[Camera],
+        viewmats: List[torch.Tensor],
+        visibility_min_T: float = 0.5,
+    ):
+        render_mode = 'RGB+D'
+        Ks = create_batch(cameras, lambda x: x.intrinsics)
+        viewmats = create_batch(viewmats)
+        return rasterization(
+            means=self.means,
+            quats=self.quats,
+            log_scales=self.scales,
+            logit_opacities=self.opacities,
+            logit_colors=self.colors,
+            viewmats=viewmats,
+            Ks=Ks,
+            width=cameras[0].width,
+            height=cameras[0].height,
+            render_mode=render_mode,
+            packed=False,
+            log_uncertainties=self.log_uncertainties,
+            visibility_min_T=visibility_min_T,
+            backgrounds=self.background.tile([len(cameras), 1]),
+        )
+
     def forward(
         self,
         cameras: List[Camera],

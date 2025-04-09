@@ -102,7 +102,6 @@ class Trajectory(torch.nn.Module):
         self,
         interval: float,
         starting_time: float,
-        end_time: float = None,
         num_cps: int = 4000,
     ):
         super().__init__()
@@ -110,7 +109,6 @@ class Trajectory(torch.nn.Module):
         self.cps_R3 = torch.nn.Parameter(torch.zeros([num_cps, 3], requires_grad=True))
         self.interval: float = interval
         self.starting_time: float = starting_time
-        self.end_time: float = self.starting_time if end_time is None else end_time
         self.gravity_vector: torch.nn.Parameter = torch.nn.Parameter(
             torch.randn(
                 [
@@ -119,14 +117,33 @@ class Trajectory(torch.nn.Module):
                 requires_grad=True,
             )
         )
-        self.gravity_alignment = pp.identity_Sim3(requires_grad=True)
+        self.gravity_alignment = pp.Parameter(pp.identity_Sim3(requires_grad=True))
         self.cursor = 0
 
     @torch.no_grad()
     def add_control_point(self, new_SO3: pp.SO3, new_R3: torch.Tensor):
+        assert self.cursor < self.cps_SO3.shape[0]
         self.cps_SO3[self.cursor] = new_SO3
         self.cps_R3[self.cursor] = new_R3
         self.cursor += 1
+
+    def support_end(self):
+        return self.starting_time + self.interval * self.cursor
+
+    @torch.no_grad()
+    def extend_to_time(self, time: float):
+        n_added = 0
+        while self.support_end() < time:
+            assert self.cursor < self.cps_SO3.shape[0]
+            so3 = self.cps_SO3[self.cursor - 2].Inv() * self.cps_SO3[self.cursor - 1]
+            self.cps_SO3[self.cursor] = self.cps_SO3[self.cursor - 1] * so3 * so3
+            self.cps_R3[self.cursor] = self.cps_R3[self.cursor - 1] + 2 * (
+                self.cps_R3[self.cursor - 1] - self.cps_R3[self.cursor - 2]
+            )
+            self.cursor += 1
+            n_added += 1
+        if n_added > 0:
+            print(f'Added {n_added} CPs upto time {time}, {self.support_end()=}')
 
     def _parse_time(self, time: torch.Tensor):
         segment = math.floor((time - self.starting_time) / self.interval)

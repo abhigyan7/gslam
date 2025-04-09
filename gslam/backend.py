@@ -11,6 +11,7 @@ from typing import Dict, assert_never
 
 from fused_ssim import fused_ssim
 import nerfview
+import pypose as pp
 import torch
 import tqdm
 import viser
@@ -29,6 +30,7 @@ from .pruning import (
     prune_using_mask,
 )
 from .rasterization import RasterizationOutput
+from .trajectory import Trajectory
 from .utils import create_batch, StopOnPlateau
 
 # from .utils import create_batch,  StopOnPlateau
@@ -99,6 +101,8 @@ class MapConfig:
     kf_cos: float = math.cos(math.pi / 30)
 
     use_gt_depths: bool = False
+
+    traj_interval: float = 0.4
 
 
 def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
@@ -182,6 +186,7 @@ class Backend(torch.multiprocessing.Process):
 
         self.splats_mutex = torch.multiprocessing.Lock()
         self.enable_viser_server = enable_viser_server
+        self.trajectory: Trajectory = None
 
     @torch.no_grad()
     def viewer_render_fn(
@@ -330,7 +335,7 @@ class Backend(torch.multiprocessing.Process):
 
         early_stopper = StopOnPlateau(3, 0.012)
 
-        for step in (pbar := tqdm.trange(n_iters)):
+        for step in (pbar := tqdm.trange(n_iters, disable=True)):
             self.total_step += 1
             window = self.optimization_window()
             cameras = [x.camera for x in window]
@@ -485,7 +490,7 @@ class Backend(torch.multiprocessing.Process):
         if n_iters is None:
             n_iters = self.conf.num_iters_mapping
 
-        for step in (pbar := tqdm.trange(n_iters)):
+        for step in (pbar := tqdm.trange(n_iters, disable=True)):
             self.total_step += 1
             window = self.optimization_window()
             cameras = [x.camera for x in window]
@@ -703,6 +708,7 @@ class Backend(torch.multiprocessing.Process):
                 self.splats.no_grad_clone(),
                 # self.splats.mask(self.last_outputs.radii[0] > 0).no_grad_clone(),
                 deepcopy(self.pose_graph),
+                deepcopy(self.trajectory),
             )
         )
         return
@@ -792,7 +798,14 @@ class Backend(torch.multiprocessing.Process):
             keyframes=list(self.keyframes.values()),
             gt_depthmap=frame.gt_depth if self.conf.use_gt_depths else None,
         )
-
+        self.trajectory = Trajectory(
+            self.conf.traj_interval, frame.timestamp - self.conf.traj_interval
+        )
+        for i in range(4):
+            tx = torch.zeros((3,), requires_grad=True, device=self.conf.device)
+            R = torch.eye(3, device=self.conf.device)
+            SO3 = pp.mat2SO3(R).requires_grad_(True).detach()
+            self.trajectory.add_control_point(SO3, tx)
         return
 
     def add_keyframe(self, frame: Frame):

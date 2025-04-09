@@ -15,9 +15,11 @@ T1 = TypeVar("T1")
 
 
 def create_batch(
-    things: List[T1], getter: Callable[[T1], torch.Tensor]
+    things: List[T1],
+    getter: Callable[[T1], torch.Tensor] = None,
 ) -> torch.Tensor:
-    things = [getter(thing) for thing in things]
+    if getter is not None:
+        things = [getter(thing) for thing in things]
     return torch.stack(things, dim=0)
 
 
