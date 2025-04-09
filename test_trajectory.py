@@ -11,6 +11,8 @@ from tqdm import tqdm
 import rerun as rr
 import time
 
+# rr = MagicMock()
+
 torch.set_default_device('cuda')
 # torch.autograd.set_detect_anomaly(True)
 
@@ -23,7 +25,7 @@ def plot_points(pts):
 def log_pose(r: pp.SO3_type, t: torch.Tensor, is_kf=False, i: int = 0):
     q = np.roll(r.detach().cpu().numpy().reshape(-1), -1)
     t = t.detach().cpu().numpy().reshape(-1)
-    name = f'/control_point_{i}' if is_kf else '/interpolated_point'
+    name = f'/control_point/{i}' if is_kf else '/interpolated_point'
     rr.log(
         name,
         rr.Transform3D(
@@ -52,47 +54,81 @@ def log_pose(r: pp.SO3_type, t: torch.Tensor, is_kf=False, i: int = 0):
 
 rr.init('spline', recording_id=f'spline_{int(time.time())}', spawn=True)
 
-dataset = TumAsync('/mnt/data/datasets/rgbd_dataset_freiburg1_room')
-traj = Trajectory(0.25, dataset.gt_timestamps[0])
+dataset = TumAsync(
+    '/mnt/data/datasets/rgbd_dataset_freiburg1_xyz', factors=(SensorTypes.IMU,)
+)
 
-timestamps = []
-for gt_pose in dataset.poses[::10]:
+# traj = Trajectory(0.25, dataset[0][1].timestamp-0.25)
+# for frame_type, frame in dataset:
+#     print(f'{traj.cursor=}, {traj.support_end()=}')
+#     print(f'{frame_type=}, {frame.timestamp=}')
+#     ret = traj.extend_to_time(frame.timestamp)
+#     traj(frame.timestamp)
+#     print()
+#     if frame_type == SensorTypes.RGB:
+#         pass
+#     elif frame_type == SensorTypes.Depth:
+#         pass
+#     else:
+#         pass
+#     time.sleep(0.01)
+#
+# exit()
+
+poses = dataset.poses[:1000:10]
+timestamps = dataset.gt_timestamps[:1000:10]
+interval = timestamps[2] - timestamps[1]
+traj = Trajectory(interval, dataset.gt_timestamps[0])
+for gt_pose in tqdm(poses):
     tx = torch.from_numpy(gt_pose[:3, 3]).requires_grad_(True).detach()
     R = gt_pose[:3, :3]
     SO3 = pp.mat2SO3(R).requires_grad_(True).detach()
     traj.add_control_point(SO3, tx)
-timestamps.extend(dataset.gt_timestamps[::10])
 
 optimizer = torch.optim.Adam(traj.parameters())
-starting_time = None
-end_time = None
 
 for j in tqdm(range(100)):
-    for i in tqdm(range(0, 1000, 10), leave=False):
+    loss = 0
+    for i in tqdm(range(0, 1000, 100), leave=False):
         sensor_type, frame = dataset[i]
         if sensor_type == SensorTypes.IMU:
             frame: IMUFrame = frame
             gt_accel = frame.accel
-            observed_accel = traj.acceleration(frame.timestamp, gravity=True)
-            loss = (gt_accel - observed_accel).square().sum()
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            if starting_time is None:
-                starting_time = frame.timestamp
-            end_time = frame.timestamp
+            observed_accel = traj.acceleration(frame.timestamp)
+            loss = (gt_accel - observed_accel).square().sum() + loss
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
 
 print(traj)
-
-timestamps = np.linspace(
-    traj.starting_time, traj.starting_time + traj.interval * len(traj.cps_SO3), 100
-)
-timestamps = np.linspace(starting_time, end_time, 100)
+timestamps = np.linspace(timestamps[0], timestamps[-1], 1000)
 timestamps = np.array(timestamps)
+
 interps = []
 with torch.no_grad():
-    for i, t in tqdm(enumerate(timestamps), leave=False):
+    for idx, (frame_type, frame) in tqdm(enumerate(dataset), total=len(dataset)):
+        if idx % 5 > 0:
+            continue
+        if frame.timestamp < (traj.starting_time + traj.interval):
+            continue
+        if frame.timestamp > (traj.support_end() - 2 * traj.interval):
+            continue
+        frame: IMUFrame = frame
+        if frame_type == SensorTypes.RGB:
+            continue
+        if frame_type == SensorTypes.Depth:
+            continue
+        t = frame.timestamp
+        # breakpoint()
         rot_q, translation = traj(t.item())
+        log_pose(rot_q, translation)
+        segment, _t = traj._parse_time(t.item())
+        rr.log(
+            '/segment',
+            rr.Scalar(
+                segment - 1,
+            ),
+        )
         vel = traj.velocity(t.item())
         mag = vel.square().sum().sqrt().item()
         rr.log(
@@ -101,7 +137,7 @@ with torch.no_grad():
                 mag,
             ),
         )
-        accel = traj.acceleration(t.item(), gravity=True)
+        accel = traj.acceleration(t.item())
         mag = accel.square().sum().sqrt().item()
         rr.log(
             '/accel',
@@ -109,16 +145,25 @@ with torch.no_grad():
                 mag,
             ),
         )
-        mag = torch.tensor(dataset.accel_frames[i]).square().sum().sqrt().item()
+        mag = torch.tensor(frame.accel).square().sum().sqrt().item()
         rr.log(
             '/accel_gt',
             rr.Scalar(
                 mag,
             ),
         )
-        log_pose(rot_q, translation)
         interps.append(translation)
 
+print(f'{traj.cursor=}')
+for i in range(traj.cursor):
+    rot_r = traj.cps_R3[i]
+    rot_q = traj.cps_SO3[i]
+    log_pose(rot_q, rot_r, is_kf=True, i=i)
+
+for i in range(traj.cursor):
+    rot_r = traj.cps_R3[i]
+    rot_q = traj.cps_SO3[i]
+    log_pose(rot_q, rot_r)
 interps = torch.stack(interps)
 
 # plot_points(xyz)

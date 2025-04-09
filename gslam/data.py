@@ -264,7 +264,11 @@ class RGBSensorStream(Process):
 
 
 class TumAsync:
-    def __init__(self, sequence_dir: Path):
+    def __init__(
+        self,
+        sequence_dir: Path,
+        factors: tuple = (SensorTypes.RGB, SensorTypes.IMU, SensorTypes.Depth),
+    ):
         self.sequence_dir = Path(sequence_dir)
         self.num_frames = 0
 
@@ -286,6 +290,8 @@ class TumAsync:
         if accel_frames_file.exists() and accel_frames_file.is_file():
             accel_frames = np.loadtxt(accel_frames_file, np.double)
             self.accel_frames = accel_frames[..., 1:]
+            mean_accel = self.accel_frames.mean(axis=0)
+            self.accel_frames = self.accel_frames - mean_accel
             self.accel_timestamps = accel_frames[..., 0]
             self.num_frames += len(accel_frames)
 
@@ -347,7 +353,13 @@ class TumAsync:
             for (idx, ts) in enumerate(self.depth_frame_timestamps)
         ]
 
-        all_timestamps = imu_timestamps + rgb_timestamps + depth_timestamps
+        all_timestamps = []
+        if SensorTypes.IMU in factors:
+            all_timestamps.extend(imu_timestamps)
+        if SensorTypes.Depth in factors:
+            all_timestamps.extend(depth_timestamps)
+        if SensorTypes.RGB in factors:
+            all_timestamps.extend(rgb_timestamps)
 
         self.sorted_timestamps = sorted(all_timestamps, key=lambda x: x[-1])
 

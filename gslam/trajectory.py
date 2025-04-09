@@ -119,6 +119,7 @@ class Trajectory(torch.nn.Module):
         )
         self.gravity_alignment = pp.Parameter(pp.identity_Sim3(requires_grad=True))
         self.cursor = 0
+        # self.extend_to_time(starting_time+4*interval)
 
     @torch.no_grad()
     def add_control_point(self, new_SO3: pp.SO3, new_R3: torch.Tensor):
@@ -144,11 +145,17 @@ class Trajectory(torch.nn.Module):
             n_added += 1
         if n_added > 0:
             print(f'Added {n_added} CPs upto time {time}, {self.support_end()=}')
+            return True
+        return False
 
     def _parse_time(self, time: torch.Tensor):
         segment = math.floor((time - self.starting_time) / self.interval)
-        segment = max(segment, 1)
-        segment = min(segment, len(self) - 3)
+        if segment < 1:
+            print(f'Too early: {time=}, {self.starting_time=}, {self.interval=}')
+            segment = 1
+        if segment > self.cursor - 2:
+            print(f'Too far: {time=}, {self.support_end()=}, {self.interval=}')
+            segment = self.cursor - 2
         segment_start = segment * self.interval + self.starting_time
         t = (time - segment_start) / self.interval
         return segment, t
@@ -222,7 +229,7 @@ class Trajectory(torch.nn.Module):
         diffs_R3 = cps_R3[1:] - cps_R3[:-1]
         ret_R3 = coeff_1 * diffs_R3[0] + coeff_2 * diffs_R3[1] + coeff_3 * diffs_R3[2]
         SO3, _R3 = self.forward(time)
-        ret_R3 = SO3 * ret_R3
+        ret_R3 = SO3 * ret_R3 * (1.0 / self.interval) ** 2 * 2.0
         if gravity:
             ret_R3 = ret_R3 + self.gravity_alignment * self.gravity_vector
         return ret_R3
