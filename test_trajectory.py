@@ -3,6 +3,7 @@
 from gslam.trajectory import Trajectory
 from gslam.data import TumAsync, SensorTypes
 from gslam.primitives import IMUFrame
+from gslam.utils import create_batch
 import pypose as pp
 import torch
 import numpy as np
@@ -13,7 +14,8 @@ import time
 
 # rr = MagicMock()
 
-torch.set_default_device('cuda')
+device = 'cuda'
+torch.set_default_device(device)
 # torch.autograd.set_detect_anomaly(True)
 
 
@@ -87,21 +89,22 @@ for gt_pose in tqdm(poses):
 
 optimizer = torch.optim.Adam(traj.parameters())
 
-for j in tqdm(range(100)):
-    loss = 0
-    for i in tqdm(range(0, 1000, 100), leave=False):
-        sensor_type, frame = dataset[i]
-        if sensor_type == SensorTypes.IMU:
-            frame: IMUFrame = frame
-            gt_accel = frame.accel
-            observed_accel = traj.acceleration(frame.timestamp)
-            loss = (gt_accel - observed_accel).square().sum() + loss
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
+batch_size = 1000
+for epoch in tqdm(range(10)):
+    for batch in tqdm(range(0, len(dataset) - 2 * batch_size, batch_size), leave=False):
+        frames = [dataset[i][1] for i in range(batch, batch + batch_size)]
+        gt_accels = create_batch(frames, lambda x: x.accel)
+        times = torch.tensor(
+            [f.timestamp for f in frames], device=device, dtype=torch.double
+        )
+        observed_accels = traj.acceleration(times)
+        loss = (gt_accels - observed_accels).square().mean()
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
 
 print(traj)
-timestamps = np.linspace(timestamps[0], timestamps[-1], 1000)
+timestamps = np.linspace(timestamps[0].item(), timestamps[-1].item(), 1000)
 timestamps = np.array(timestamps)
 
 interps = []
@@ -119,8 +122,8 @@ with torch.no_grad():
         if frame_type == SensorTypes.Depth:
             continue
         t = frame.timestamp
-        # breakpoint()
-        rot_q, translation = traj(t.item())
+        t = torch.tensor([t.item()], device=device, dtype=torch.double)
+        rot_q, translation = traj(t)
         log_pose(rot_q, translation)
         segment, _t = traj._parse_time(t.item())
         rr.log(
@@ -129,7 +132,7 @@ with torch.no_grad():
                 segment - 1,
             ),
         )
-        vel = traj.velocity(t.item())
+        vel = traj.velocity(t)
         mag = vel.square().sum().sqrt().item()
         rr.log(
             '/vel',
@@ -137,7 +140,7 @@ with torch.no_grad():
                 mag,
             ),
         )
-        accel = traj.acceleration(t.item())
+        accel = traj.acceleration(t)
         mag = accel.square().sum().sqrt().item()
         rr.log(
             '/accel',

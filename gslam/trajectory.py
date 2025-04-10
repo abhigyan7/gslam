@@ -105,8 +105,12 @@ class Trajectory(torch.nn.Module):
         num_cps: int = 4000,
     ):
         super().__init__()
-        self.cps_SO3 = pp.Parameter(pp.identity_SO3(num_cps, requires_grad=True))
-        self.cps_R3 = torch.nn.Parameter(torch.zeros([num_cps, 3], requires_grad=True))
+        self.cps_SO3 = pp.Parameter(
+            pp.identity_SO3(num_cps, requires_grad=True, dtype=torch.double)
+        )
+        self.cps_R3 = torch.nn.Parameter(
+            torch.zeros([num_cps, 3], requires_grad=True, dtype=torch.double)
+        )
         self.interval: float = interval
         self.starting_time: float = starting_time
         self.gravity_vector: torch.nn.Parameter = torch.nn.Parameter(
@@ -120,6 +124,11 @@ class Trajectory(torch.nn.Module):
         self.gravity_alignment = pp.Parameter(pp.identity_Sim3(requires_grad=True))
         self.cursor = 0
         # self.extend_to_time(starting_time+4*interval)
+
+        # [-1, 0, 1, 2], pre-alloc'd and stored in device
+        self.indices_4 = torch.arange(
+            -1, 3, device=self.cps_SO3.device, dtype=torch.long
+        )
 
     @torch.no_grad()
     def add_control_point(self, new_SO3: pp.SO3, new_R3: torch.Tensor):
@@ -160,74 +169,79 @@ class Trajectory(torch.nn.Module):
         t = (time - segment_start) / self.interval
         return segment, t
 
+    def _parse_time_torch(self, time: torch.Tensor):
+        segment = time.sub(self.starting_time).div(self.interval).floor()
+        segment = segment.clamp(1, self.cursor - 2)
+        segment_start = (segment * self.interval + self.starting_time).detach()
+        t = (time - segment_start) / self.interval
+        return segment.long(), t
+
     def __len__(
         self,
     ):
-        return len(self.cps_SO3)
+        return self.cursor
 
     def forward(self, time: torch.Tensor):
-        segment, t = self._parse_time(time)
-        coeff_1 = (5.0 + 3 * t - 3 * t * t + t * t * t) / 6.0
-        coeff_2 = (1.0 + 3 * t + 3 * t * t - 2 * t * t * t) / 6.0
-        coeff_3 = (t * t * t) / 6.0
+        if not isinstance(time, torch.Tensor):
+            time = torch.tensor(time, device=self.cps_R3.device, dtype=torch.double)
+        segment, t = self._parse_time_torch(time)
+        t2 = t.square()
+        t3 = t * t2
+        coeff_1 = (5.0 + 3 * t - 3 * t2 + t3) / 6.0
+        coeff_2 = (1.0 + 3 * t + 3 * t2 - 2 * t3) / 6.0
+        coeff_3 = t3 / 6.0
 
-        cps_SO3 = self.cps_SO3[segment - 1 : segment + 3]
-        diffs_so3 = (cps_SO3[:-1].Inv() @ cps_SO3[1:]).Log()
-        ret_SO3 = cps_SO3[0]
-        ret_SO3 = ret_SO3 * (diffs_so3[0] * coeff_1).Exp()
-        ret_SO3 = ret_SO3 * (diffs_so3[1] * coeff_2).Exp()
-        ret_SO3 = ret_SO3 * (diffs_so3[2] * coeff_3).Exp()
+        cps_SO3 = self.cps_SO3[segment.reshape(-1, 1) + self.indices_4]
+        diffs_so3 = (cps_SO3[..., :-1, :].Inv() @ cps_SO3[..., 1:, :]).Log()
+        ret_SO3 = cps_SO3[..., 0, :]
+        ret_SO3 = ret_SO3 * (diffs_so3[..., 0, :] * coeff_1.view(-1, 1)).Exp()
+        ret_SO3 = ret_SO3 * (diffs_so3[..., 1, :] * coeff_2.view(-1, 1)).Exp()
+        ret_SO3 = ret_SO3 * (diffs_so3[..., 2, :] * coeff_3.view(-1, 1)).Exp()
 
-        cps_R3 = self.cps_R3[segment - 1 : segment + 3]
-        diffs_R3 = cps_R3[1:] - cps_R3[:-1]
-        ret_R3 = cps_R3[0] + (
-            coeff_1 * diffs_R3[0] + coeff_2 * diffs_R3[1] + coeff_3 * diffs_R3[2]
+        cps_R3 = self.cps_R3[segment.reshape(-1, 1) + self.indices_4]
+        diffs_R3 = cps_R3[..., 1:, :] - cps_R3[..., :-1, :]
+        ret_R3 = cps_R3[..., 0, :] + (
+            coeff_1.view(-1, 1) * diffs_R3[..., 0, :]
+            + coeff_2.view(-1, 1) * diffs_R3[..., 1, :]
+            + coeff_3.view(-1, 1) * diffs_R3[..., 2, :]
         )
 
         return ret_SO3, ret_R3
 
-    def angular_velocity(self, time: torch.Tensor):
-        segment, t = self._parse_time(time)
-        dot_coeff_1 = (3.0 - 6 * t + 3 * t * t) / 6.0
-        dot_coeff_2 = (3 + 6 * t - 6 * t * t) / 6.0
-        dot_coeff_3 = (3 * t * t) / 6.0
-
-        coeff_1 = (5.0 + 3 * t - 3 * t * t + t * t * t) / 6.0
-        coeff_2 = (1.0 + 3 * t + 3 * t * t - 2 * t * t * t) / 6.0
-        coeff_3 = (t * t * t) / 6.0
-
-        cps_SO3 = self.cps_SO3[segment - 1 : segment + 3]
-        diffs_so3 = (cps_SO3[:-1].Inv() @ cps_SO3[1:]).Log()
-        ret_se3 = (dot_coeff_1 * diffs_so3[0]).Exp() * (diffs_so3[0] * coeff_1)
-        ret_se3 = (dot_coeff_2 * diffs_so3[1]).Exp() * ret_se3 + (
-            diffs_so3[1] * coeff_2
-        )
-        ret_se3 = (dot_coeff_3 * diffs_so3[2]).Exp() * ret_se3 + (
-            diffs_so3[2] * coeff_3
-        )
-
-        return ret_se3
-
     def velocity(self, time: torch.Tensor, gravity: bool = False):
-        segment, t = self._parse_time(time)
-        coeff_1 = (3.0 - 6 * t + 3 * t * t) / 6.0
-        coeff_2 = (3 + 6 * t - 6 * t * t) / 6.0
-        coeff_3 = (3 * t * t) / 6.0
+        if not isinstance(time, torch.Tensor):
+            time = torch.tensor(time, device=self.cps_R3.device, dtype=torch.double)
+        segment, t = self._parse_time_torch(time)
+        t2 = t.square()
+        coeff_1 = (3.0 - 6 * t + 3 * t2) / 6.0
+        coeff_2 = (3 + 6 * t - 6 * t2) / 6.0
+        coeff_3 = (3 * t2) / 6.0
 
-        cps_R3 = self.cps_R3[segment - 1 : segment + 3]
-        diffs_R3 = cps_R3[1:] - cps_R3[:-1]
-        ret_R3 = coeff_1 * diffs_R3[0] + coeff_2 * diffs_R3[1] + coeff_3 * diffs_R3[2]
+        cps_R3 = self.cps_R3[segment.reshape(-1, 1) + self.indices_4]
+        diffs_R3 = cps_R3[..., 1:, :] - cps_R3[..., :-1, :]
+        ret_R3 = (
+            coeff_1.view(-1, 1) * diffs_R3[..., 0, :]
+            + coeff_2.view(-1, 1) * diffs_R3[..., 1, :]
+            + coeff_3.view(-1, 1) * diffs_R3[..., 2, :]
+        )
         return ret_R3
 
     def acceleration(self, time: torch.Tensor, gravity: bool = False):
-        segment, t = self._parse_time(time)
+        if not isinstance(time, torch.Tensor):
+            time = torch.tensor(time, device=self.cps_R3.device, dtype=torch.double)
+        segment, t = self._parse_time_torch(time)
         coeff_1 = -1 + t
         coeff_2 = 1 - 2 * t
         coeff_3 = t
 
-        cps_R3 = self.cps_R3[segment - 1 : segment + 3]
-        diffs_R3 = cps_R3[1:] - cps_R3[:-1]
-        ret_R3 = coeff_1 * diffs_R3[0] + coeff_2 * diffs_R3[1] + coeff_3 * diffs_R3[2]
+        cps_R3 = self.cps_R3[segment.reshape(-1, 1) + self.indices_4]
+        diffs_R3 = cps_R3[..., 1:, :] - cps_R3[..., :-1, :]
+        ret_R3 = (
+            coeff_1.view(-1, 1) * diffs_R3[..., 0, :]
+            + coeff_2.view(-1, 1) * diffs_R3[..., 1, :]
+            + coeff_3.view(-1, 1) * diffs_R3[..., 2, :]
+        )
+
         SO3, _R3 = self.forward(time)
         ret_R3 = SO3 * ret_R3 * (1.0 / self.interval) ** 2 * 2.0
         if gravity:

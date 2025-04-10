@@ -364,7 +364,7 @@ class TumAsync:
         self.sorted_timestamps = sorted(all_timestamps, key=lambda x: x[-1])
 
     def __len__(self):
-        return self.num_frames
+        return len(self.sorted_timestamps)
 
     def __getitem__(self, idx):
         if idx >= len(self):
