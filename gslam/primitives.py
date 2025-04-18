@@ -67,6 +67,14 @@ class PoseZhou(torch.nn.Module):
                 [1, 0, 0, 0, 1, 0], device=self.Rt.device, dtype=torch.float32
             ),
         )
+        self.register_buffer(
+            'eye4_row4',
+            torch.tensor(
+                [0, 0, 0, 1],
+                device=self.Rt.device,
+                dtype=self.Rt.dtype,
+            ),
+        )
 
     def set_random_pose_delta(self):
         torch.nn.init.normal_(self.embeds.weight)
@@ -74,11 +82,14 @@ class PoseZhou(torch.nn.Module):
     def forward(self) -> torch.Tensor:
         if not self.is_learnable:
             return self.Rt
-        rot = unvmap(rotation_6d_to_matrix)(self.dR + self.id)
-        transform = torch.eye(4, device=self.Rt.device)
-        transform[..., :3, :3] = rot
-        transform[..., :3, 3] = self.dt
-        return torch.matmul(self.Rt, transform)
+        rot = rotation_6d_to_matrix(self.dR + self.id)
+        dRt = torch.cat(
+            [
+                torch.cat([rot, self.dt.view(3, 1)], dim=-1),
+                self.eye4_row4.view(1, 4),
+            ]
+        )
+        return torch.matmul(self.Rt, dRt)
 
     def to_qt(
         self,

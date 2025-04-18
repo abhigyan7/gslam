@@ -133,6 +133,34 @@ def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.
     return tv_h + tv_w
 
 
+def edge_aware_tv(
+    depth: torch.Tensor, rgb: torch.Tensor, mask: torch.Tensor = None
+) -> torch.Tensor:
+    """
+    Args:
+        depth: [batch, H, W]
+        rgb: [batch, H, W, 3]
+        mask: [mask, H, W, 1]
+    """
+    grad_depth_x = torch.abs(depth[..., :, :-1, None] - depth[..., :, 1:, None])
+    grad_depth_y = torch.abs(depth[..., :-1, :, None] - depth[..., 1:, :, None])
+
+    grad_img_x = torch.mean(
+        torch.abs(rgb[..., :, :-1, :] - rgb[..., :, 1:, :]), -1, keepdim=True
+    )
+    grad_img_y = torch.mean(
+        torch.abs(rgb[..., :-1, :, :] - rgb[..., 1:, :, :]), -1, keepdim=True
+    )
+
+    grad_depth_x *= torch.exp(-grad_img_x)
+    grad_depth_y *= torch.exp(-grad_img_y)
+
+    return (
+        grad_depth_x[mask[..., :, :-1, None]].sum()
+        + grad_depth_y[mask[..., :-1, :, None]].sum()
+    )
+
+
 class StopOnPlateau:
     '''Stop optimization if loss doesn't decrease appreciably for a bit'''
 

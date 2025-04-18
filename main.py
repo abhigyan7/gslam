@@ -59,6 +59,7 @@ def main(conf: PipelineConfig):
         backend_done_event,
         output_dir,
         global_pause_event,
+        run_name=run_name,
     )
 
     backend_process = Backend(
@@ -67,6 +68,8 @@ def main(conf: PipelineConfig):
         backend_to_frontend_queue,
         backend_done_event,
         global_pause_event,
+        run_name=run_name,
+        output_dir=output_dir,
     )
 
     sensor_stream_process.start()

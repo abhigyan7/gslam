@@ -17,25 +17,24 @@ import tqdm
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pypose as pp
+from PIL import Image
 from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import peak_signal_noise_ratio as psnr
-from PIL import Image
 
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, PoseZhou as Pose, matrix_to_quaternion
 from .rasterization import RasterizationOutput
-from .trajectory import evaluate_trajectories, Trajectory
+from .trajectory import evaluate_trajectories
 from .utils import (
-    torch_image_to_np,
     torch_to_pil,
     false_colormap,
     unvmap,
     StopOnPlateau,
+    torch_image_to_np,
     # ForkedPdb,
 )
-from .visualization import log_frame, get_blueprint
+from .visualization import log_frame, log_splats
 from .warp import Warp
 
 plt.switch_backend('agg')
@@ -72,12 +71,14 @@ class Frontend(mp.Process):
         backend_done_event: Event = None,
         output_dir: Path = None,
         global_pause_event: Event = None,
+        run_name: str = 'fe',
     ):
         super().__init__()
         self.conf: TrackingConfig = conf
         self.map_queue: mp.Queue = backend_queue
         self.queue: mp.Queue[int] = frontend_queue
         self.keyframes: dict[int, Frame] = dict()
+        self.run_name: str = run_name
 
         self.requested_init = False
         self.logger = logging.getLogger(__name__)
@@ -95,7 +96,6 @@ class Frontend(mp.Process):
         self.frontend_done_event = frontend_done_event
         self.backend_done_event = backend_done_event
         self.global_pause_event = global_pause_event
-        self.trajectory: Trajectory = None
 
         self.output_dir = output_dir
         os.makedirs(self.output_dir / 'final', exist_ok=True)
@@ -156,14 +156,6 @@ class Frontend(mp.Process):
 
         if self.conf.method == 'igs':
             self.request_initialization(new_frame)
-        self.trajectory = Trajectory(
-            self.conf.traj_interval, new_frame.timestamp - self.conf.traj_interval
-        ).to(self.conf.device)
-        for i in range(4):
-            tx = torch.zeros((3,), requires_grad=True, device=self.conf.device)
-            R = torch.eye(3, device=self.conf.device)
-            SO3 = pp.mat2SO3(R).requires_grad_(True).detach()
-            self.trajectory.add_control_point(SO3, tx)
         return
 
     def request_initialization(self, f: Frame):
@@ -217,13 +209,14 @@ class Frontend(mp.Process):
         outputs = None
         start_time = time.time()
 
-        self.trajectory.extend_to_time(new_frame.timestamp)
+        # self.trajectory.extend_to_time(new_frame.timestamp)
 
         if n_iters > 0:
             if self.conf.method == 'warp':
                 loss = self.warp_track(new_frame, n_iters, optimizer, scheduler)
             elif self.conf.method == 'igs':
-                loss = self.igs_track_lbfgs(new_frame, n_iters, optimizer, scheduler)
+                loss = self.igs_track_lbfgs(new_frame, n_iters)
+                # loss = self.igs_track(new_frame, n_iters, optimizer, scheduler)
             else:
                 assert_never(self.conf.method)
 
@@ -232,6 +225,9 @@ class Frontend(mp.Process):
             outputs = self.splats(
                 [new_frame.camera], [new_frame.pose], render_depth=True
             )
+        self.frames.append(new_frame.strip())
+        if new_frame.index > 0:
+            self.add_frame_to_backend(new_frame)
 
         Thread(
             target=log_frame,
@@ -243,17 +239,7 @@ class Frontend(mp.Process):
                 "is_tracking_frame": True,
             },
         ).start()
-        Thread(
-            target=self.save_tracking_stats,
-            args=(new_frame, loss),
-            kwargs={
-                "tracking_time": time.time() - start_time,
-                'outputs': outputs,
-            },
-        )
-        self.frames.append(new_frame.strip())
-        if new_frame.index > 0:
-            self.add_frame_to_backend(new_frame)
+
         return new_frame.pose()
 
     def add_frame_to_backend(self, new_frame: Frame):
@@ -267,7 +253,6 @@ class Frontend(mp.Process):
         rgbs: torch.Tensor,
         splats: GaussianSplattingData,
         pose_graph: dict[int, set],
-        trajectory: Trajectory,
     ):
         self.keyframes = deepcopy(keyframes)
         self.reference_depthmap = depthmap.clone()
@@ -275,134 +260,12 @@ class Frontend(mp.Process):
         self.reference_rgbs = rgbs
         self.splats = deepcopy(splats)
         self.pose_graph = pose_graph
-
-        for kf in self.keyframes.values():
-            log_frame(kf, name=f'/tracking/kf/{kf.index}', is_tracking_frame=False)
-        line_strips = []
-        for kf_i in self.pose_graph:
-            for kf_j in self.pose_graph[kf_i]:
-                if kf_i > kf_j:
-                    continue
-                t1 = self.keyframes[kf_i].pose().inverse()[:3, 3].detach().cpu().numpy()
-                t2 = self.keyframes[kf_j].pose().inverse()[:3, 3].detach().cpu().numpy()
-                line_strips.append(np.vstack((t1, t2)).tolist())
-
-        rr.log(
-            '/tracking/pose_graph',
-            rr.LineStrips3D(line_strips, colors=[[255, 255, 255]]),
-        )
-
-        # dump splats only after 15 frames have passed since the last time we did it
-        if (self.frames[-1].index - self.last_time_we_sent_splats_to_rerun) > 15:
-            self.dump_pointcloud()
-            self.last_time_we_sent_splats_to_rerun = self.frames[-1].index
-
         # self.trajectory = trajectory
         return
 
     def sync_at_end(self, splats: GaussianSplattingData, keyframes: dict[int, Frame]):
         self.splats, self.keyframes = splats, deepcopy(keyframes)
         return
-
-    @torch.no_grad()
-    def dump_pointcloud(self):
-        modified_colors = self.splats.colors.detach().cpu().numpy()
-        modified_opacities = self.splats.opacities.detach().cpu().numpy()
-        modified_colors = 1 / (
-            1
-            + np.exp(
-                -np.concatenate(
-                    [modified_colors, modified_opacities[..., None]], axis=1
-                )
-            )
-        )
-        if self.splats.ages.max() != 0:
-            modified_colors[
-                self.splats.ages.cpu().numpy() == self.splats.ages.max().cpu().numpy()
-            ] = np.array([[0, 1, 0, 1]])
-        rr.log(
-            '/tracking/pc',
-            rr.Points3D(
-                positions=self.splats.means.detach().cpu().numpy(),
-                radii=torch.exp(self.splats.scales)
-                .min(dim=-1)
-                .values.detach()
-                .cpu()
-                .numpy()
-                * 0.5,
-                colors=modified_colors,
-            ),
-        )
-
-        transparency = torch.sigmoid(self.splats.opacities)
-        radii = self.splats.scales.exp() * transparency.unsqueeze(-1) * 2.0 + 0.004
-        q = self.splats.quats.cpu().numpy()
-        q = np.roll(q, -1, axis=1)
-        rr.log(
-            '/tracking/splats',
-            rr.Ellipsoids3D(
-                half_sizes=radii.cpu().numpy(),
-                centers=self.splats.means.cpu().numpy(),
-                quaternions=q,
-                colors=modified_colors,
-                fill_mode=rr.components.FillMode.Solid,
-            ),
-        )
-
-    @torch.no_grad()
-    def evaluate_reconstruction(self):
-        for i, kf in enumerate(
-            tqdm.tqdm(self.keyframes.values(), 'Rendering all keyframes')
-        ):
-            outputs = self.splats(
-                [kf.camera],
-                [kf.pose],
-            )
-            torch_to_pil(outputs.rgbs[0]).save(self.output_dir / f'final/{i:08}.jpg')
-
-            rr.log(
-                f'/tracking/pose_{i}/image',
-                rr.Image(
-                    torch_image_to_np(outputs.rgbs[0]), color_model=rr.ColorModel.RGB
-                ).compress(jpeg_quality=95),
-            )
-
-        psnrs = []
-        ssims = []
-
-        for i, f in enumerate(tqdm.tqdm(self.frames, 'Rendering all frames')):
-            outputs = self.splats(
-                [f.camera],
-                [f.pose],
-                render_depth=True,
-            )
-
-            rgb_np = torch_image_to_np(outputs.rgbs[0])
-            false_colormap(
-                outputs.depthmaps[0],
-                near=0.0,
-                far=2.0,
-            ).save(self.output_dir / f'final_depths/{i:08}.jpg')
-            Image.fromarray(rgb_np).save(self.output_dir / f'final_renders/{i:08}.jpg')
-
-            if f.img_file is None:
-                continue
-            gt_img = np.array(Image.open(f.img_file))
-            psnrs.append(
-                psnr(
-                    rgb_np,
-                    gt_img,
-                )
-            )
-            ssims.append(
-                ssim(
-                    rgb_np,
-                    gt_img,
-                    channel_axis=2,
-                )
-            )
-
-        return {'ssim': np.mean(ssims), 'psnr': np.mean(psnrs)}
 
     @torch.no_grad
     def evaluate_trajectory(self) -> dict:
@@ -485,6 +348,61 @@ class Frontend(mp.Process):
 
             torch_to_pil(outputs.rgbs[0]).save(self.output_dir / f"renders/{i:08}.jpg")
 
+    @torch.no_grad()
+    def evaluate_reconstruction(self):
+        for i, kf in enumerate(
+            tqdm.tqdm(self.keyframes.values(), 'Rendering all keyframes')
+        ):
+            outputs = self.splats(
+                [kf.camera],
+                [kf.pose],
+            )
+            # torch_to_pil(outputs.rgbs[0]).save(self.output_dir / f'final/{i:08}.jpg')
+
+            rr.log(
+                f'/tracking/pose_{i}/image',
+                rr.Image(
+                    torch_image_to_np(outputs.rgbs[0]), color_model=rr.ColorModel.RGB
+                ).compress(jpeg_quality=95),
+            )
+
+        psnrs = []
+        ssims = []
+
+        for i, f in enumerate(tqdm.tqdm(self.frames, 'Rendering all frames')):
+            outputs = self.splats(
+                [f.camera],
+                [f.pose],
+                render_depth=True,
+            )
+
+            rgb_np = torch_image_to_np(outputs.rgbs[0])
+            # false_colormap(
+            #     outputs.depthmaps[0],
+            #     near=0.0,
+            #     far=2.0,
+            # ).save(self.output_dir / f'final_depths/{i:08}.jpg')
+            # Image.fromarray(rgb_np).save(self.output_dir / f'final_renders/{i:08}.jpg')
+
+            if f.img_file is None:
+                continue
+            gt_img = np.array(Image.open(f.img_file))
+            psnrs.append(
+                psnr(
+                    rgb_np,
+                    gt_img,
+                )
+            )
+            ssims.append(
+                ssim(
+                    rgb_np,
+                    gt_img,
+                    channel_axis=2,
+                )
+            )
+
+        return {'ssim': np.mean(ssims), 'psnr': np.mean(psnrs)}
+
     def handle_message_from_backend(self, message):
         match message:
             case [
@@ -494,9 +412,8 @@ class Frontend(mp.Process):
                 rgbs,
                 splats,
                 pose_graph,
-                trajectory,
             ]:
-                self.sync(keyframes, depthmap, rgbs, splats, pose_graph, trajectory)
+                self.sync(keyframes, depthmap, rgbs, splats, pose_graph)
                 self.waiting_for_sync = False
             case [BackendMessage.END_SYNC, map_data, keyframes]:
                 self.sync_at_end(map_data, keyframes)
@@ -508,10 +425,10 @@ class Frontend(mp.Process):
 
     @rr.shutdown_at_exit
     def run(self):
-        rr.init('gslam', recording_id=f'gslam_1_{int(time.time()) % 10000}', spawn=True)
+        rr.init('gslam', recording_id=self.run_name, spawn=True)
         # rr.save(self.output_dir / 'rr-fe.rrd')
-        rr.log("/tracking", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
-        rr.send_blueprint(get_blueprint())
+        # rr.log("/tracking", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
+        # rr.send_blueprint(get_blueprint())
 
         self.warp = None
 
@@ -519,7 +436,6 @@ class Frontend(mp.Process):
         self.waiting_for_sync = False
 
         last_time_we_heard_from_backend = time.time()
-        self.last_time_we_sent_splats_to_rerun = -100000000
 
         self.done = False
 
@@ -554,10 +470,6 @@ class Frontend(mp.Process):
                     continue
 
                 frame = frame.to(self.conf.device)
-                if self.warp is None:
-                    self.warp = Warp(
-                        frame.camera.intrinsics, frame.camera.height, frame.camera.width
-                    )
                 self.track(frame)
 
                 if len(self.frames) % 30 == 0:
@@ -586,12 +498,12 @@ class Frontend(mp.Process):
 
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')
-        self.dump_pointcloud()
+        log_splats(self.splats)
         metrics = dict()
         metrics.update(self.evaluate_reconstruction())
         metrics.update(self.evaluate_trajectory())
         self.save_trajectories()
-        self.create_videos()
+        # self.create_videos()
 
         metrics['N'] = self.splats.means.shape[0]
         metrics['C'] = len(self.keyframes)
@@ -611,6 +523,12 @@ class Frontend(mp.Process):
 
     def warp_track(self, new_frame, n_iters, optimizer, scheduler):
         _loss = 0.0
+        if self.warp is None:
+            self.warp = Warp(
+                new_frame.camera.intrinsics,
+                new_frame.camera.height,
+                new_frame.camera.width,
+            )
         for i in (
             _pbar := tqdm.trange(n_iters, desc=f"[Tracking] frame {len(self.frames)}")
         ):
@@ -672,8 +590,6 @@ class Frontend(mp.Process):
 
             _loss = loss.item()
 
-            # loss += new_frame.pose.se3.norm() * self.conf.pose_regularization
-
             loss.backward()
             optimizer.step()
             scheduler.step()
@@ -688,18 +604,21 @@ class Frontend(mp.Process):
                 break
         return loss
 
-    def igs_track_lbfgs(self, new_frame: Frame, n_iters, optimizer, scheduler):
+    def igs_track_lbfgs(self, new_frame: Frame, n_iters):
         start_time = time.time()
         n_iters = 0
-        # params = list(new_frame.pose.parameters())
-        params = list(self.trajectory.parameters())
+        params = list(new_frame.pose.parameters())
         if self.conf.learn_exposure_params:
+            new_frame.exposure_params.data = (
+                self.frames[-1].exposure_params.clone().detach()
+            )
             params.append(new_frame.exposure_params)
         optimizer = torch.optim.LBFGS(
             params,
             history_size=5,
             line_search_fn='strong_wolfe',
-            tolerance_change=1e-6,
+            tolerance_change=1e-9,
+            lr=self.conf.pose_optim_lr,
         )
         last_loss = None
 
@@ -708,14 +627,10 @@ class Frontend(mp.Process):
             n_iters += 1
             if torch.is_grad_enabled():
                 optimizer.zero_grad()
-            R, t = self.trajectory(new_frame.timestamp)
-            # ForkedPdb(self.global_pause_event).set_trace()
-            pose = torch.eye(4, device=self.conf.device)
-            pose[:3, :3] = R.matrix()
-            pose[:3, 3] = t
-            outputs: RasterizationOutput = self.splats.render(
+            outputs: RasterizationOutput = self.splats(
                 [new_frame.camera],
-                [pose],
+                [new_frame.pose],
+                render_depth=True,
             )
             if self.conf.learn_exposure_params:
                 rendered_rgb = (
@@ -738,20 +653,13 @@ class Frontend(mp.Process):
 
         sgd_optimizer = torch.optim.Adam(params, self.conf.pose_optim_lr)
         for i in range(5):
-            closure()
+            loss = closure()
             sgd_optimizer.step()
             sgd_optimizer.zero_grad()
-        del sgd_optimizer
+            print(f'SGD: {i=}, {loss.item()=}')
 
         optimizer.step(closure)
         print(
-            f'LBFGS: {new_frame.index} {last_loss=} {n_iters=}, time: {((time.time() - start_time)*1000.0):.1f}ms'
-        )
-        R, t = self.trajectory(new_frame.timestamp)
-        pose = torch.eye(4, device=self.conf.device)
-        pose[:3, :3] = R.matrix()
-        pose[:3, 3] = t
-        new_frame.pose = Pose(pose.detach().clone(), is_learnable=True).to(
-            self.conf.device
+            f'LBFGS: {new_frame.index} {last_loss=} {n_iters=}, time: {((time.time() - start_time) * 1000.0):.1f}ms'
         )
         return last_loss

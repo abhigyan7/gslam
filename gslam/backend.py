@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from itertools import combinations
 import logging
 import math
+from pathlib import Path
 import random
 import threading
 import time
@@ -11,7 +12,7 @@ from typing import Dict, assert_never
 
 from fused_ssim import fused_ssim
 import nerfview
-import pypose as pp
+import rerun as rr
 import torch
 import tqdm
 import viser
@@ -22,20 +23,21 @@ from .insertion import InsertFromDepthMap, InsertUsingImagePlaneGradients
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .pose_graph import add_constraint
-from .primitives import Frame, PoseZhou as Pose, Camera
+from .primitives import Camera, Frame, PoseZhou as Pose
 from .pruning import (
-    PruneLowOpacity,
-    PruneLargeGaussians,
     PruneIllConditionedGaussians,
+    PruneLargeGaussians,
+    PruneLowOpacity,
     prune_using_mask,
 )
 from .rasterization import RasterizationOutput
-from .trajectory import Trajectory
-from .utils import create_batch, StopOnPlateau
-
-# from .utils import create_batch,  StopOnPlateau
+from .utils import (
+    create_batch,
+    edge_aware_tv,
+    StopOnPlateau,
+)
 from .viewer import Viewer
-from .warp import Warp
+from .visualization import get_blueprint, log_frame, log_splats
 
 
 @dataclass
@@ -105,45 +107,6 @@ class MapConfig:
     traj_interval: float = 0.4
 
 
-def total_variation_loss(img: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-    v_h = img[..., 1:, :] - img[..., :-1, :]
-    v_w = img[..., :, 1:] - img[..., :, :-1]
-    if mask is not None:
-        v_h = v_h * mask[..., 1:, :]
-        v_w = v_w * mask[..., :, 1:]
-    tv_h = (v_h).pow(2).sum()
-    tv_w = (v_w).pow(2).sum()
-    return tv_h + tv_w
-
-
-def edge_aware_tv(
-    depth: torch.Tensor, rgb: torch.Tensor, mask: torch.Tensor = None
-) -> torch.Tensor:
-    """
-    Args:
-        depth: [batch, H, W]
-        rgb: [batch, H, W, 3]
-        mask: [mask, H, W, 1]
-    """
-    grad_depth_x = torch.abs(depth[..., :, :-1, None] - depth[..., :, 1:, None])
-    grad_depth_y = torch.abs(depth[..., :-1, :, None] - depth[..., 1:, :, None])
-
-    grad_img_x = torch.mean(
-        torch.abs(rgb[..., :, :-1, :] - rgb[..., :, 1:, :]), -1, keepdim=True
-    )
-    grad_img_y = torch.mean(
-        torch.abs(rgb[..., :-1, :, :] - rgb[..., 1:, :, :]), -1, keepdim=True
-    )
-
-    grad_depth_x *= torch.exp(-grad_img_x)
-    grad_depth_y *= torch.exp(-grad_img_y)
-
-    return (
-        grad_depth_x[mask[..., :, :-1, None]].sum()
-        + grad_depth_y[mask[..., :-1, :, None]].sum()
-    )
-
-
 class Backend(torch.multiprocessing.Process):
     def __init__(
         self,
@@ -153,6 +116,8 @@ class Backend(torch.multiprocessing.Process):
         backend_done_event: threading.Event,
         global_pause_event: threading.Event,
         enable_viser_server: bool = False,
+        run_name: str = 'be',
+        output_dir: Path = None,
     ):
         super().__init__()
         self.conf = conf
@@ -161,8 +126,11 @@ class Backend(torch.multiprocessing.Process):
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel("DEBUG")
         self.keyframes: dict[int, Frame] = dict()
+        self.frames: list[Frame] = []
         self.backend_done_event = backend_done_event
         self.global_pause_event = global_pause_event
+        self.run_name: str = run_name
+        self.output_dir: Path = output_dir
 
         self.splats = GaussianSplattingData.empty()
         self.pruning_opacity = PruneLowOpacity(self.conf.opacity_pruning_threshold)
@@ -186,7 +154,7 @@ class Backend(torch.multiprocessing.Process):
 
         self.splats_mutex = torch.multiprocessing.Lock()
         self.enable_viser_server = enable_viser_server
-        self.trajectory: Trajectory = None
+        self.last_time_we_sent_splats_to_rerun = -100000000
 
     @torch.no_grad()
     def viewer_render_fn(
@@ -278,54 +246,6 @@ class Backend(torch.multiprocessing.Process):
         window = [self.keyframes[i] for i in sorted(window)]
         return window
 
-    def initialize_map(self):
-        window = self.optimization_window()
-        params = [p for p in self.splats.parameters() if p.requires_grad]
-        cameras = [x.camera for x in window]
-        poses = torch.nn.ModuleList([x.pose for x in window])
-        gt_imgs = create_batch(window, lambda x: x.img)
-        exposure_params = create_batch(window, lambda x: x.exposure_params)
-        optimizer = torch.optim.LBFGS(
-            params,
-            # line_search_fn='strong_wolfe',
-            # max_iter=2000,
-        )
-        n_iters = 0
-
-        def closure():
-            nonlocal n_iters
-            n_iters += 1
-            if torch.is_grad_enabled():
-                optimizer.zero_grad()
-            outputs: RasterizationOutput = self.splats(
-                cameras, poses, render_depth=True
-            )
-            rendered_rgbs = outputs.rgbs * exposure_params[..., 0].view(
-                -1, 1, 1, 1
-            ).exp() + exposure_params[..., 1].view(-1, 1, 1, 1)
-            photometric_loss = (rendered_rgbs - gt_imgs).square().mean()
-            if photometric_loss.requires_grad:
-                photometric_loss.backward()
-            return photometric_loss
-
-        optimizer.step(closure)
-        last_kf = list(self.keyframes.values())[-1]
-
-        outputs = self.splats(
-            [last_kf.camera],
-            [last_kf.pose],
-            True,
-        )
-
-        last_kf.visible_gaussians = outputs.radii.sum(dim=0) > 0
-        self.last_outputs = outputs
-        self.last_kf_depthmap = outputs.depthmaps[0]
-        self.last_kf_rgbs = outputs.rgbs[0]
-
-        print(f'Map initialized in {n_iters} using L-BFGS')
-
-        return
-
     def optimize_map(self, n_iters: int = None, prune=True, regularize=True):
         if n_iters is None:
             n_iters = self.conf.num_iters_mapping
@@ -335,7 +255,7 @@ class Backend(torch.multiprocessing.Process):
 
         early_stopper = StopOnPlateau(3, 0.012)
 
-        for step in (pbar := tqdm.trange(n_iters, disable=True)):
+        for step in (pbar := tqdm.trange(n_iters)):
             self.total_step += 1
             window = self.optimization_window()
             cameras = [x.camera for x in window]
@@ -407,7 +327,7 @@ class Backend(torch.multiprocessing.Process):
 
             total_loss.backward()
 
-            if (self.total_step % 100) == 0:
+            if (self.total_step % 200) == 0:
                 self.insertion_3dgs.step(
                     self.splats,
                     self.splat_optimizers,
@@ -418,10 +338,10 @@ class Backend(torch.multiprocessing.Process):
                 prune = False
 
             desc = (
-                f"[Mapping] keyframe {len(self.keyframes)} pm={photometric_loss.item():.4f}, "
-                f"loss={total_loss.item():.5f}, "
-                f"n_splats={self.splats.means.shape[0]:07}, "
-                f"mean_beta={self.splats.log_uncertainties.exp().mean().item():.3f}"
+                f"[Mapping] keyframe {len(self.keyframes)} pm={photometric_loss.item():.3f}, "
+                f"loss={total_loss.item():.3f}, "
+                f"n_splats={self.splats.means.shape[0]:06}, "
+                f"mean_beta={self.splats.log_uncertainties.exp().mean().item():.1f}, "
                 f"window: {len(window)}"
             )
             pbar.set_description(desc)
@@ -429,7 +349,7 @@ class Backend(torch.multiprocessing.Process):
             self.step_all_optimizers()
 
             if early_stopper.stop(photometric_loss.item()):
-                print('Pausing map optimization')
+                # print('Pausing map optimization')
                 self.pause_map_optim = True
                 break
 
@@ -486,126 +406,6 @@ class Backend(torch.multiprocessing.Process):
 
         return
 
-    def optimize_map_sgd(self, n_iters: int = None, regularize=True):
-        if n_iters is None:
-            n_iters = self.conf.num_iters_mapping
-
-        for step in (pbar := tqdm.trange(n_iters, disable=True)):
-            self.total_step += 1
-            window = self.optimization_window()
-            cameras = [x.camera for x in window]
-            poses = torch.nn.ModuleList([x.pose for x in window])
-            gt_imgs = create_batch(window, lambda x: x.img)
-            exposure_params = create_batch(window, lambda x: x.exposure_params)
-            self.zero_grad_all_optimizers()
-
-            outputs: RasterizationOutput = self.splats(
-                cameras,
-                poses,
-                render_depth=True,
-            )
-
-            rendered_rgbs = outputs.rgbs * exposure_params[..., 0].view(
-                -1, 1, 1, 1
-            ).exp() + exposure_params[..., 1].view(-1, 1, 1, 1)
-
-            if self.conf.active_gs:
-                photometric_loss = (rendered_rgbs - gt_imgs).square().sum(dim=-1)
-                photometric_loss = photometric_loss / (2 * outputs.betas.square())
-                photometric_loss = photometric_loss.mean()
-                photometric_loss = (
-                    photometric_loss + (outputs.betas.log().square() * 0.5).mean()
-                )
-            else:
-                photometric_loss = (outputs.rgbs - gt_imgs).square().mean()
-
-            visible_gaussians = outputs.radii.sum(dim=0) > 0
-            mean_scales = (
-                self.splats.scales[visible_gaussians]
-                .mean(dim=1, keepdim=True)
-                .exp()
-                .detach()
-            )
-            isotropic_loss = (
-                (self.splats.scales.exp()[visible_gaussians] - mean_scales).abs().sum()
-            )
-            if not self.conf.use_gt_depths:
-                depth_regularization_loss = edge_aware_tv(
-                    outputs.depthmaps,
-                    outputs.rgbs,
-                    outputs.alphas[..., 0] > 0.4,
-                )
-            ssim_loss = 1.0 - fused_ssim(
-                outputs.rgbs.permute(0, 3, 1, 2),
-                gt_imgs.permute(0, 3, 1, 2),
-                padding='valid',
-            )
-            total_loss = (
-                (1.0 - self.conf.ssim_weight) * photometric_loss
-                + self.conf.ssim_weight * ssim_loss
-                + self.conf.isotropic_regularization_weight * isotropic_loss
-            )
-            if regularize:
-                if not self.conf.use_gt_depths:
-                    total_loss += (
-                        +self.conf.depth_regularization_weight
-                        * depth_regularization_loss
-                    )
-
-            if self.conf.use_gt_depths:
-                gt_depths = create_batch(window, lambda f: f.gt_depth)
-                depth_residual = outputs.depthmaps - gt_depths
-                depth_loss = (depth_residual[gt_depths > 0]).abs().mean()
-                total_loss += depth_loss * 0.1
-
-            outputs.means2d.retain_grad()
-
-            total_loss.backward()
-
-            if (self.total_step % 100) == 0:
-                self.insertion_3dgs.step(
-                    self.splats,
-                    self.splat_optimizers,
-                    outputs,
-                    None,
-                    None,
-                )
-
-            desc = (
-                f"[Mapping] keyframe {len(self.keyframes)} pm={photometric_loss.item():.4f}, "
-                f"loss={total_loss.item():.5f}, "
-                f"n_splats={self.splats.means.shape[0]:07}, "
-                f"mean_beta={self.splats.log_uncertainties.exp().mean().item():.3f}, "
-                f"window: {len(window)}"
-            )
-            pbar.set_description(desc)
-
-            self.step_all_optimizers()
-
-            with torch.no_grad():
-                self.splats.opacities.data[(outputs.radii > 0).sum(dim=0) > 1] *= (
-                    self.conf.opacity_decay
-                )
-
-        for f, d in zip(window, outputs.depthmaps):
-            f.est_depths = d.detach().clone()
-
-        last_kf = list(self.keyframes.values())[-1]
-
-        outputs = self.splats(
-            [last_kf.camera],
-            [last_kf.pose],
-            True,
-        )
-
-        # last_kf.visible_gaussians = (outputs.n_touched.sum(dim=0) > 0).detach()
-        last_kf.visible_gaussians = outputs.radii.sum(dim=0) > 0
-        self.last_outputs = outputs
-        self.last_kf_depthmap = outputs.depthmaps[0]
-        self.last_kf_rgbs = outputs.rgbs[0]
-
-        return
-
     def run_pruning(self):
         last_kf = list(self.keyframes.values())[-1]
         outputs = self.splats(
@@ -635,6 +435,13 @@ class Backend(torch.multiprocessing.Process):
             self.splat_optimizers,
         )
         prune_using_mask(self.splats, self.splat_optimizers, ~remove_mask)
+        last_kf = list(self.keyframes.values())[-1]
+        outputs = self.splats(
+            [last_kf.camera],
+            [last_kf.pose],
+            True,
+        )
+        self.last_outputs = outputs
         return
 
     def optimize_poses_lbfgs(self):
@@ -659,7 +466,7 @@ class Backend(torch.multiprocessing.Process):
             params,
             history_size=10,
             line_search_fn='strong_wolfe',
-            tolerance_change=1e-6,
+            tolerance_change=1e-7,
         )
 
         def closure():
@@ -695,7 +502,7 @@ class Backend(torch.multiprocessing.Process):
             return photometric_loss
 
         optimizer.step(closure)
-        print('Pose Optimization: L-BFGS')
+        # print('Pose Optimization: L-BFGS')
         return last_loss
 
     def sync(self):
@@ -708,9 +515,30 @@ class Backend(torch.multiprocessing.Process):
                 self.splats.no_grad_clone(),
                 # self.splats.mask(self.last_outputs.radii[0] > 0).no_grad_clone(),
                 deepcopy(self.pose_graph),
-                deepcopy(self.trajectory),
             )
         )
+
+        for kf in self.keyframes.values():
+            log_frame(kf, name=f'/tracking/kf/{kf.index}', is_tracking_frame=False)
+        line_strips = []
+        for kf_i in self.pose_graph:
+            for kf_j in self.pose_graph[kf_i]:
+                if kf_i > kf_j:
+                    continue
+                t1 = self.keyframes[kf_i].pose().inverse()[:3, 3].detach().cpu().numpy()
+                t2 = self.keyframes[kf_j].pose().inverse()[:3, 3].detach().cpu().numpy()
+                line_strips.append(np.vstack((t1, t2)).tolist())
+
+        rr.log(
+            '/tracking/pose_graph',
+            rr.LineStrips3D(line_strips, colors=[[255, 255, 255]]),
+        )
+
+        # dump splats only after 15 frames have passed since the last time we did it
+        if (self.frames[-1].index - self.last_time_we_sent_splats_to_rerun) > 15:
+            self.dump_pointcloud()
+            self.last_time_we_sent_splats_to_rerun = self.frames[-1].index
+
         return
 
     def end_sync(self):
@@ -775,6 +603,7 @@ class Backend(torch.multiprocessing.Process):
 
     def initialize(self, frame: Frame):
         frame = frame.to(self.conf.device)
+        self.frames.append(frame.strip())
         self.keyframes[frame.index] = frame
         self.splats = GaussianSplattingData.empty().to(self.conf.device)
         self.initialize_optimizers()
@@ -798,14 +627,6 @@ class Backend(torch.multiprocessing.Process):
             keyframes=list(self.keyframes.values()),
             gt_depthmap=frame.gt_depth if self.conf.use_gt_depths else None,
         )
-        self.trajectory = Trajectory(
-            self.conf.traj_interval, frame.timestamp - self.conf.traj_interval
-        )
-        for i in range(4):
-            tx = torch.zeros((3,), requires_grad=True, device=self.conf.device)
-            R = torch.eye(3, device=self.conf.device)
-            SO3 = pp.mat2SO3(R).requires_grad_(True).detach()
-            self.trajectory.add_control_point(SO3, tx)
         return
 
     def add_keyframe(self, frame: Frame):
@@ -964,12 +785,50 @@ class Backend(torch.multiprocessing.Process):
             new_frame.pose()[:3, 2], previous_keyframe.pose()[:3, 2], dim=0
         )
         if cosine_sim < self.conf.kf_cos:
-            print(f"Added keyframe: rotation={torch.acos(cosine_sim)*180/torch.pi}\n")
+            print(
+                f"Added keyframe: rotation={torch.acos(cosine_sim) * 180 / torch.pi}\n"
+            )
             return True
         return False
 
+    @torch.no_grad()
+    def dump_pointcloud(self):
+        modified_colors = self.splats.colors.detach().cpu().numpy()
+        modified_opacities = self.splats.opacities.detach().cpu().numpy()
+        modified_colors = 1 / (
+            1
+            + np.exp(
+                -np.concatenate(
+                    [modified_colors, modified_opacities[..., None]], axis=1
+                )
+            )
+        )
+        if self.splats.ages.max() != 0:
+            modified_colors[
+                self.splats.ages.cpu().numpy() == self.splats.ages.max().cpu().numpy()
+            ] = np.array([[0, 1, 0, 1]])
+
+        transparency = torch.sigmoid(self.splats.opacities)
+        radii = self.splats.scales.exp() * transparency.unsqueeze(-1) * 2.0 + 0.004
+        q = self.splats.quats.cpu().numpy()
+        q = np.roll(q, -1, axis=1)
+        rr.log(
+            '/tracking/splats',
+            rr.Ellipsoids3D(
+                half_sizes=radii.cpu().numpy(),
+                centers=self.splats.means.cpu().numpy(),
+                quaternions=q,
+                colors=modified_colors,
+                fill_mode=rr.components.FillMode.Solid,
+            ),
+        )
+
+    @rr.shutdown_at_exit
     def run(self):
-        self.warp = None
+        rr.init('gslam', recording_id=self.run_name, spawn=True)
+        # rr.save(self.output_dir / 'rr-fe.rrd')
+        rr.log("/tracking", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
+        rr.send_blueprint(get_blueprint())
         self.pause_map_optim = False
 
         if self.enable_viser_server:
@@ -986,7 +845,7 @@ class Backend(torch.multiprocessing.Process):
                     time.sleep(0.03)
                     continue
                 with self.splats_mutex:
-                    self.optimize_map_sgd()
+                    self.optimize_map()
                     if len(self.keyframes) > 1:
                         self.run_pruning()
                         self.optimize_poses_lbfgs()
@@ -995,13 +854,9 @@ class Backend(torch.multiprocessing.Process):
                     raise NotImplementedError()
                 case [FrontendMessage.ADD_FRAME, frame]:
                     frame = deepcopy(frame)
-                    if self.warp is None:
-                        self.warp = Warp(
-                            frame.camera.intrinsics,
-                            frame.camera.height,
-                            frame.camera.width,
-                        )
+                    self.frames.append(frame.strip())
                     if len(self.keyframes) == 0:
+                        print("This is bad.")
                         self.initialize(frame)
                         continue
                     last_keyframe = self.keyframes[sorted(self.keyframes.keys())[-1]]
@@ -1016,17 +871,16 @@ class Backend(torch.multiprocessing.Process):
                     if frame.index % 5 == 0:
                         with self.splats_mutex:
                             self.sync()
+                            log_splats(self.splats)
                 case [FrontendMessage.REQUEST_INIT, frame]:
                     frame = deepcopy(frame)
+                    self.frames.append(frame.strip())
                     self.pause_map_optim = False
                     self.initialize(frame)
                     with self.splats_mutex:
                         self.optimize_map(
-                            self.conf.num_iters_initialization,
-                            prune=True,
-                            regularize=False,
+                            self.conf.num_iters_initialization, False, True
                         )
-                        # self.initialize_map()
                     self.sync()
                     continue
                 case None:
@@ -1038,4 +892,12 @@ class Backend(torch.multiprocessing.Process):
 
         self.end_sync()
         print(self.pose_graph)
+        self.dump_pointcloud()
+
+        checkpoint_file = self.output_dir / 'splats.ckpt'
+        torch.save(self.splats, checkpoint_file)
+        print(f'Saved Checkpoints to {checkpoint_file}')
+
+        self.logger.warning('frontend done.')
+
         self.backend_done_event.set()

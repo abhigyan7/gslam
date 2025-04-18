@@ -121,3 +121,43 @@ def get_blueprint() -> rrb.Blueprint:
     )
 
     return rrb.Blueprint(blueprint, collapse_panels=True)
+
+
+@torch.no_grad()
+def log_splats(splats):
+    modified_colors = splats.colors.detach().cpu().numpy()
+    modified_opacities = splats.opacities.detach().cpu().numpy()
+    modified_colors = 1 / (
+        1
+        + np.exp(
+            -np.concatenate([modified_colors, modified_opacities[..., None]], axis=1)
+        )
+    )
+    if splats.ages.max() != 0:
+        modified_colors[
+            splats.ages.cpu().numpy() == splats.ages.max().cpu().numpy()
+        ] = np.array([[0, 1, 0, 1]])
+    rr.log(
+        '/tracking/pc',
+        rr.Points3D(
+            positions=splats.means.detach().cpu().numpy(),
+            radii=torch.exp(splats.scales).min(dim=-1).values.detach().cpu().numpy()
+            * 0.5,
+            colors=modified_colors,
+        ),
+    )
+
+    transparency = torch.sigmoid(splats.opacities)
+    radii = splats.scales.exp() * transparency.unsqueeze(-1) * 2.0 + 0.004
+    q = splats.quats.cpu().numpy()
+    q = np.roll(q, -1, axis=1)
+    rr.log(
+        '/tracking/splats',
+        rr.Ellipsoids3D(
+            half_sizes=radii.cpu().numpy(),
+            centers=splats.means.cpu().numpy(),
+            quaternions=q,
+            colors=modified_colors,
+            fill_mode=rr.components.FillMode.Solid,
+        ),
+    )

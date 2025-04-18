@@ -113,21 +113,21 @@ class Trajectory(torch.nn.Module):
         )
         self.interval: float = interval
         self.starting_time: float = starting_time
-        self.gravity_vector: torch.nn.Parameter = torch.nn.Parameter(
-            torch.randn(
-                [
-                    3,
-                ],
-                requires_grad=True,
-            )
-        )
-        self.gravity_alignment = pp.Parameter(pp.identity_Sim3(requires_grad=True))
+        # self.gravity_vector: torch.nn.Parameter = torch.nn.Parameter(
+        #     torch.randn(
+        #         [
+        #             3,
+        #         ],
+        #         requires_grad=True,
+        #     )
+        # )
+        # self.gravity_alignment = pp.Parameter(pp.identity_Sim3(requires_grad=True))
         self.cursor = 0
         # self.extend_to_time(starting_time+4*interval)
 
         # [-1, 0, 1, 2], pre-alloc'd and stored in device
-        self.indices_4 = torch.arange(
-            -1, 3, device=self.cps_SO3.device, dtype=torch.long
+        self.indices_4 = torch.nn.Buffer(
+            torch.arange(-1, 3, device=self.cps_SO3.device, dtype=torch.long)
         )
 
     @torch.no_grad()
