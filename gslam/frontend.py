@@ -21,6 +21,7 @@ from PIL import Image
 from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import peak_signal_noise_ratio as psnr
 
+from .data import OakdSensor
 from .map import GaussianSplattingData
 from .messages import BackendMessage, FrontendMessage
 from .primitives import Frame, PoseZhou as Pose, matrix_to_quaternion
@@ -72,6 +73,7 @@ class Frontend(mp.Process):
         output_dir: Path = None,
         global_pause_event: Event = None,
         run_name: str = 'fe',
+        is_oak: bool = False,
     ):
         super().__init__()
         self.conf: TrackingConfig = conf
@@ -79,6 +81,7 @@ class Frontend(mp.Process):
         self.queue: mp.Queue[int] = frontend_queue
         self.keyframes: dict[int, Frame] = dict()
         self.run_name: str = run_name
+        self.is_oak = is_oak
 
         self.requested_init = False
         self.logger = logging.getLogger(__name__)
@@ -261,6 +264,7 @@ class Frontend(mp.Process):
         self.splats = deepcopy(splats)
         self.pose_graph = pose_graph
         # self.trajectory = trajectory
+        print('FE/BE Sync')
         return
 
     def sync_at_end(self, splats: GaussianSplattingData, keyframes: dict[int, Frame]):
@@ -430,6 +434,12 @@ class Frontend(mp.Process):
         # rr.log("/tracking", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
         # rr.send_blueprint(get_blueprint())
 
+        if self.is_oak:
+            print('oak')
+            self.sensor = OakdSensor(fps=15.0)
+            self.sensor.start()
+            self.sensor_queue = self.sensor.output_queue
+
         self.warp = None
 
         self.waiting_for_end_sync = False
@@ -441,6 +451,7 @@ class Frontend(mp.Process):
 
         while True:
             if not self.queue.empty():
+                print('backend is not empty')
                 self.handle_message_from_backend(self.queue.get())
                 last_time_we_heard_from_backend = time.time()
 
@@ -460,8 +471,16 @@ class Frontend(mp.Process):
             if self.done:
                 break
 
-            if not self.sensor_queue.empty():
-                frame: Frame = self.sensor_queue.get()
+            queue_is_empty = False
+            if hasattr(self.sensor_queue, "empty") and self.sensor_queue.empty():
+                queue_is_empty = True
+            if hasattr(self.sensor_queue, "has") and not self.sensor_queue.has():
+                queue_is_empty = True
+            if not queue_is_empty:
+                if self.is_oak:
+                    frame: Frame = self.sensor.next()
+                else:
+                    frame: Frame = self.sensor_queue.get()
                 if frame is None:
                     # data stream exhausted
                     self.map_queue.put(None)
@@ -477,33 +496,10 @@ class Frontend(mp.Process):
                     torch.save(self.splats, checkpoint_file)
                     print(f'Saved Checkpoints to {checkpoint_file}')
 
-                    metrics = dict()
-                    metrics['L'] = len(self.frames)
-                    metrics['C'] = len(self.keyframes)
-                    metrics['N'] = self.splats.means.shape[0]
-                    metrics.update(self.evaluate_trajectory())
-                    print(f'{metrics=}')
-                    with open(self.output_dir / 'metrics.json', 'a') as f:
-                        json.dump(metrics, f)
-                        f.write('\n')
-                    self.save_trajectories()
-
-                    rr.log(
-                        '/tracking/ate/pg', rr.Scalar(metrics.get('ate_keyframes', 0.0))
-                    )
-                    rr.log(
-                        '/tracking/ate/tracking',
-                        rr.Scalar(metrics.get('ate_tracking', 0.0)),
-                    )
-
         self.backend_done_event.wait()
         self.logger.warning('Got backend done.')
         log_splats(self.splats)
         metrics = dict()
-        metrics.update(self.evaluate_reconstruction())
-        metrics.update(self.evaluate_trajectory())
-        self.save_trajectories()
-        # self.create_videos()
 
         metrics['N'] = self.splats.means.shape[0]
         metrics['C'] = len(self.keyframes)

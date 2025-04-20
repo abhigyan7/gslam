@@ -16,12 +16,12 @@ from typing import Literal
 
 @dataclass
 class PipelineConfig:
-    scene: Path
+    scene: Path = None
     m: MapConfig = field(default_factory=lambda: MapConfig())
     t: TrackingConfig = field(default_factory=lambda: TrackingConfig())
     seq_len: int = -1
     run_name: str = ''
-    dataset: Literal["tum", "replica"] = "tum"
+    dataset: Literal["tum", "replica", "oak"] = "tum"
 
 
 def main(conf: PipelineConfig):
@@ -29,6 +29,8 @@ def main(conf: PipelineConfig):
         dataset = TumRGB(conf.scene, conf.seq_len)
     elif conf.dataset == "replica":
         dataset = Replica(conf.scene, conf.seq_len)
+    elif conf.dataset == "oak":
+        pass
 
     dataset_queue = mp.Queue()
     frontend_to_backend_queue = mp.Queue()
@@ -38,7 +40,10 @@ def main(conf: PipelineConfig):
     backend_done_event = mp.Event()
     global_pause_event = mp.Event()
 
-    sensor_stream_process = RGBSensorStream(dataset, dataset_queue, frontend_done_event)
+    if conf.dataset != "oak":
+        sensor_stream_process = RGBSensorStream(
+            dataset, dataset_queue, frontend_done_event
+        )
 
     runs_dir = Path('runs')
     run_name = conf.run_name
@@ -60,6 +65,7 @@ def main(conf: PipelineConfig):
         output_dir,
         global_pause_event,
         run_name=run_name,
+        is_oak=conf.dataset == 'oak',
     )
 
     backend_process = Backend(
@@ -72,7 +78,8 @@ def main(conf: PipelineConfig):
         output_dir=output_dir,
     )
 
-    sensor_stream_process.start()
+    if conf.dataset != "oak":
+        sensor_stream_process.start()
     backend_process.start()
     frontend_process.start()
 

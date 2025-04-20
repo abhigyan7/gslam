@@ -1,12 +1,15 @@
+from datetime import timedelta
 from pathlib import Path
 import tempfile
+import time
 
+import depthai as dai
 import numpy as np
 import torch
 from PIL import Image
 from pyquaternion import Quaternion
-from torch.multiprocessing import JoinableQueue, Process
-from threading import Event
+from torch.multiprocessing import JoinableQueue, Process, Event
+from tqdm import tqdm
 import cv2
 
 from typing import assert_never
@@ -263,6 +266,121 @@ class RGBSensorStream(Process):
         return
 
 
+RGB_SOCKET = dai.CameraBoardSocket.CAM_A
+LEFT_SOCKET = dai.CameraBoardSocket.CAM_B
+RIGHT_SOCKET = dai.CameraBoardSocket.CAM_C
+ALIGN_SOCKET = LEFT_SOCKET
+
+COLOR_RESOLUTION = dai.ColorCameraProperties.SensorResolution.THE_1080_P
+LEFT_RIGHT_RESOLUTION = dai.MonoCameraProperties.SensorResolution.THE_400_P
+
+ISP_SCALE = 3
+
+
+class OakdSensor:
+    def __init__(self, fps=30.0):
+        self.pipeline = dai.Pipeline()
+        self.camRgb = self.pipeline.create(dai.node.ColorCamera)
+        self.left = self.pipeline.create(dai.node.MonoCamera)
+        self.right = self.pipeline.create(dai.node.MonoCamera)
+        self.stereo = self.pipeline.create(dai.node.StereoDepth)
+        self.sync = self.pipeline.create(dai.node.Sync)
+        self.out = self.pipeline.create(dai.node.XLinkOut)
+        self.align = self.pipeline.create(dai.node.ImageAlign)
+
+        self.left.setResolution(LEFT_RIGHT_RESOLUTION)
+        self.left.setBoardSocket(LEFT_SOCKET)
+        self.left.setFps(fps)
+
+        self.right.setResolution(LEFT_RIGHT_RESOLUTION)
+        self.right.setBoardSocket(RIGHT_SOCKET)
+        self.right.setFps(fps)
+
+        self.camRgb.setBoardSocket(RGB_SOCKET)
+        self.camRgb.setResolution(COLOR_RESOLUTION)
+        self.camRgb.setFps(fps)
+        self.camRgb.setIspScale(1, ISP_SCALE)
+
+        self.stereo.setDefaultProfilePreset(
+            dai.node.StereoDepth.PresetMode.HIGH_DENSITY
+        )
+        self.stereo.setDepthAlign(dai.CameraBoardSocket.LEFT)
+
+        self.out.setStreamName("out")
+
+        self.sync.setSyncThreshold(timedelta(seconds=0.5 / fps))
+
+        self.camRgb.isp.link(self.sync.inputs["rgb"])
+        self.left.out.link(self.stereo.left)
+        self.right.out.link(self.stereo.right)
+        self.stereo.depth.link(self.align.input)
+        self.align.outputAligned.link(self.sync.inputs["depth_aligned"])
+        self.camRgb.isp.link(self.align.inputAlignTo)
+        self.sync.out.link(self.out.input)
+
+        self.idx = 0
+
+    def start(self):
+        self.device = dai.Device(self.pipeline)
+        self.output_queue = self.device.getOutputQueue("out", 1, False)
+        self.calibrationHandler = self.device.readCalibration()
+        self.rgbDistortion = np.array(
+            self.calibrationHandler.getDistortionCoefficients(RGB_SOCKET)
+        )
+        distortionModel = self.calibrationHandler.getDistortionModel(RGB_SOCKET)
+        if distortionModel != dai.CameraModel.Perspective:
+            raise RuntimeError(
+                "Unsupported distortion model for RGB camera. This example supports only Perspective model."
+            )
+        for i in tqdm(range(30), desc='consuming frames'):
+            _messageGroup = self.output_queue.get()
+        print('started oakd sensor')
+
+    def next(self):
+        messageGroup = self.output_queue.get()
+        assert isinstance(messageGroup, dai.MessageGroup)
+        frameRgb = messageGroup["rgb"]
+        assert isinstance(frameRgb, dai.ImgFrame)
+        frameDepth = messageGroup["depth_aligned"]
+        assert isinstance(frameDepth, dai.ImgFrame)
+
+        cvFrame = frameRgb.getCvFrame()
+        depth_image = frameDepth.getFrame()
+        rgbIntrinsics = np.array(
+            self.calibrationHandler.getCameraIntrinsics(
+                RGB_SOCKET, int(cvFrame.shape[1]), int(cvFrame.shape[0])
+            )
+        )
+        image = cv2.undistort(
+            cvFrame,
+            rgbIntrinsics,
+            np.array(self.rgbDistortion),
+        )
+        image = np.asarray(np.float32(image)) / 255.0
+        image = torch.Tensor(image).cuda()
+        height, width, _channels = image.shape
+
+        # milimeters to meters
+        depth_image = torch.Tensor(np.float32(depth_image)).cuda() / 1000.0
+        gt_pose = None
+        ts = time.time()
+        K = torch.Tensor(rgbIntrinsics).cuda()
+        camera = Camera(K, height, width)
+        gt_img_save_path = None
+        frame = Frame(
+            image,
+            ts,
+            camera,
+            Pose(),
+            gt_pose,
+            gt_depth=depth_image,
+            img_file=gt_img_save_path,
+            index=self.idx,
+        )
+        self.idx += 1
+        return frame
+
+
 class TumAsync:
     def __init__(
         self,
@@ -437,12 +555,10 @@ class TumAsync:
 
 
 if __name__ == "__main__":
-    td = TumAsync("/home/abhigyan/gslam/datasets/tum/rgbd_dataset_freiburg1_desk")
-    print(td[0])
-    print(td[1])
-
+    oakd_sensor = OakdSensor()
+    done_event = Event()
     queue = JoinableQueue()
-    stream = RGBSensorStream(td, queue)
+    stream = RGBSensorStream(oakd_sensor, queue, done_event)
     stream.run()
     while not queue.empty():
         print(queue.get())
