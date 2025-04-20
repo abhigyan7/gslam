@@ -151,7 +151,8 @@ class Frontend(mp.Process):
         new_frame.pose = Pose(pose.detach()).to(self.conf.device)
         self.keyframes[new_frame.index] = new_frame
         self.reference_frame = new_frame
-        self.reference_depthmap = torch.ones_like(new_frame.gt_depth)
+        # self.reference_depthmap = torch.ones_like(new_frame.gt_depth)
+        self.reference_depthmap = None
         self.reference_rgbs = new_frame.img
         new_frame.exposure_params = torch.nn.Parameter(
             torch.zeros([2], device=new_frame.img.device, requires_grad=False)
@@ -648,11 +649,11 @@ class Frontend(mp.Process):
             return loss
 
         sgd_optimizer = torch.optim.Adam(params, self.conf.pose_optim_lr)
-        for i in range(5):
-            loss = closure()
+        for i in range(10):
+            _loss = closure()
             sgd_optimizer.step()
             sgd_optimizer.zero_grad()
-            print(f'SGD: {i=}, {loss.item()=}')
+            # print(f'SGD: {i=}, {_loss.item()=}')
 
         optimizer.step(closure)
         print(

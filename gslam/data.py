@@ -36,6 +36,27 @@ tum_intrinsics_params = {
     "freiburg3": [535.4, 539.2, 320.1, 247.6, 0, 0, 0, 0, 0],
 }
 
+oakd_intrinsics = [
+    2285.444580078125,
+    2283.459716796875,
+    1939.57421875,
+    1084.2498779296875,
+    7.613864421844482,
+    17.2153263092041,
+    0.00012345814320724458,
+    -0.00020271474204491824,
+    -1.0174853801727295,
+    7.641190528869629,
+    19.72230339050293,
+    1.2936210632324219,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+]
+
 
 class SensorTypes(StrEnum):
     IMU = auto()
@@ -137,6 +158,9 @@ class TumRGB:
         )
         self.accel_frames = self.accel_frames[..., 1:]
 
+    def init(self):
+        return
+
     def __len__(self):
         return self.length
 
@@ -212,6 +236,9 @@ class Replica:
 
         self.Ks = torch.from_numpy(K).cuda()
 
+    def init(self):
+        return
+
     def __len__(self):
         return self.length
 
@@ -256,6 +283,7 @@ class RGBSensorStream(Process):
 
     # @rr.shutdown_at_exit
     def run(self):
+        self.dataset.init()
         for data in iter(self.dataset):
             while self.queue.qsize() > 10:
                 # preventing choke
@@ -552,6 +580,105 @@ class TumAsync:
             return (SensorTypes.IMU, frame)
 
         assert_never(sensor_type)
+
+
+class VideoCap:
+    def __init__(self, video_file: Path, start: int = 0):
+        self.video_file_path = Path(video_file)
+        self.start = start
+
+    def init(self):
+        self.video_cap = cv2.VideoCapture(self.video_file_path)
+
+        self.length = int(self.video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        print(self.length)
+
+        while self.start > 0:
+            ret, _frame = self.video_cap.read()
+            assert ret, f"video file too short for {self.start=} more frames"
+            self.length -= 1
+            self.start -= 1
+
+        fx, fy, cx, cy, *d = oakd_intrinsics
+
+        img_size = (3840, 2160)
+        K = np.array(
+            [
+                [
+                    fx,
+                    0,
+                    cx,
+                ],
+                [
+                    0,
+                    fy,
+                    cy,
+                ],
+                [
+                    0,
+                    0,
+                    1,
+                ],
+            ],
+            dtype=np.float32,
+        )
+
+        self.Ks, self.roi = cv2.getOptimalNewCameraMatrix(
+            K,
+            np.array(d),
+            img_size,
+            0,
+            img_size,
+        )
+
+        self.undistort_map_x, self.undistort_map_y = cv2.initUndistortRectifyMap(
+            K,
+            np.array(d),
+            None,
+            self.Ks,
+            img_size,
+            cv2.CV_32FC1,
+        )
+
+        self.Ks = torch.tensor(self.Ks).cuda()
+
+    def __len__(self):
+        return self.length
+
+    @torch.no_grad()
+    def __getitem__(self, idx):
+        if idx >= len(self):
+            raise StopIteration
+        _ret, im = self.video_cap.read()
+        img_size = (3840, 2160)
+        im = cv2.resize(im, dsize=img_size)
+        image = cv2.remap(
+            np.array(im),
+            self.undistort_map_x,
+            self.undistort_map_y,
+            cv2.INTER_LINEAR,
+        )
+        new_size = (480, 270)
+        x, y, w, h = self.roi
+        image = image[y : y + h, x : x + w]
+        image = cv2.resize(image, dsize=new_size)
+        image = np.asarray(np.float32(image)) / 255.0
+        image = torch.Tensor(image).cuda()
+        # height, width, _channels = image.shape
+        # print(f'old {height=}, {width=}')
+        # print(f'new height={new_size[1]}, width={new_size[0]}')
+        camera = Camera(self.Ks.clone() / 8, new_size[1], new_size[0])
+        frame = Frame(
+            image,
+            time.time(),
+            camera,
+            Pose(),
+            None,
+            gt_depth=None,
+            img_file=None,
+            index=idx,
+        )
+        return frame
 
 
 if __name__ == "__main__":

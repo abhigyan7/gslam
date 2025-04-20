@@ -2,7 +2,7 @@ from torch import multiprocessing as mp
 import tyro
 
 from gslam.backend import Backend, MapConfig
-from gslam.data import RGBSensorStream, TumRGB, Replica
+from gslam.data import RGBSensorStream, TumRGB, Replica, VideoCap
 from gslam.frontend import Frontend, TrackingConfig
 
 from dataclasses import dataclass, field
@@ -21,7 +21,7 @@ class PipelineConfig:
     t: TrackingConfig = field(default_factory=lambda: TrackingConfig())
     seq_len: int = -1
     run_name: str = ''
-    dataset: Literal["tum", "replica", "oak"] = "tum"
+    dataset: Literal["tum", "replica", "oak", "video"] = "tum"
 
 
 def main(conf: PipelineConfig):
@@ -29,6 +29,9 @@ def main(conf: PipelineConfig):
         dataset = TumRGB(conf.scene, conf.seq_len)
     elif conf.dataset == "replica":
         dataset = Replica(conf.scene, conf.seq_len)
+    elif conf.dataset == "video":
+        # skip a second because exposure is usually whack at the start
+        dataset = VideoCap(conf.scene, start=30)
     elif conf.dataset == "oak":
         pass
 
